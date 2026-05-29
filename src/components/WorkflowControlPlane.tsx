@@ -36,6 +36,14 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Popover,
   PopoverContent,
   PopoverTrigger,
@@ -65,6 +73,7 @@ import {
 import {
   getNextAgentRole,
   type AzureReferenceEvidence,
+  type ClarificationPrompt,
   type DeliveryMode,
   type RequestAttachment,
   type RequestEvidenceMode,
@@ -78,12 +87,6 @@ import {
   analyzeNaturalLanguageRequest,
   type RequestInterpretation,
 } from "@/lib/request-analysis";
-import {
-  REQUEST_INPUT_TEMPLATES,
-  appendRequestInputTemplate,
-  recommendRequestInputTemplateId,
-  type RequestInputTemplateId,
-} from "@/lib/request-templates";
 import {
   getBrowserRealtimeUrl,
   getRealtimeReconnectDelay,
@@ -104,9 +107,7 @@ type WorkflowRequestForm = {
   owner: string;
   assignedWorkerId: string;
   azureWorkItemId: string;
-  deliveryMode: DeliveryMode;
-  evidenceMode: RequestEvidenceMode;
-  templateId: RequestInputTemplateId;
+  deliveryMode: DeliveryMode | "";
 };
 
 type WorkerForm = {
@@ -219,9 +220,7 @@ const DEFAULT_REQUEST_FORM: WorkflowRequestForm = {
   owner: "",
   assignedWorkerId: "",
   azureWorkItemId: "",
-  deliveryMode: "draft_pr",
-  evidenceMode: "standard",
-  templateId: "freeform",
+  deliveryMode: "",
 };
 
 const DEFAULT_WORKER_FORM: WorkerForm = {
@@ -338,6 +337,10 @@ export function WorkflowControlPlane() {
   const repoRefreshInFlightRef = useRef(false);
   const workflowRefreshInFlightRef = useRef(false);
   const [setupDialogRequested, setSetupDialogRequested] = useState(false);
+  const [
+    dismissedClarificationDialogKey,
+    setDismissedClarificationDialogKey,
+  ] = useState("");
   const [realtimeStatus, setRealtimeStatus] =
     useState<RealtimeConnectionStatus>("connecting");
   const selectedRequestIdRef = useRef("");
@@ -358,6 +361,17 @@ export function WorkflowControlPlane() {
     : null;
   const openRun = selectedRuns.find(isOpenWorkerRun) ?? null;
   const latestRun = selectedRuns[selectedRuns.length - 1] ?? null;
+  const clarificationDialogKey =
+    selectedRequest && stageGate?.clarificationPrompt && stageGate.blockedRunId
+      ? `${selectedRequest.requestId}:${stageGate.blockedRunId}`
+      : "";
+  const quickClarificationDialogOpen = Boolean(
+    stageGate?.clarificationPrompt &&
+      clarificationDialogKey &&
+      dismissedClarificationDialogKey !== clarificationDialogKey &&
+      stageGate.needsClarification &&
+      !openRun,
+  );
   const recoveryNote = selectedRequestId
     ? recoveryNotesByRequest[selectedRequestId] ?? ""
     : "";
@@ -1257,29 +1271,9 @@ export function WorkflowControlPlane() {
       ...DEFAULT_REQUEST_FORM,
       owner: current.owner,
       assignedWorkerId: current.assignedWorkerId,
-      deliveryMode: current.deliveryMode,
     }));
     setState("success");
     setMessage("已保留目前阻擋紀錄，並清空表單可建立新需求。");
-    window.setTimeout(() => requestDetailRef.current?.focus(), 0);
-  }
-
-  function setRequestEvidenceMode(evidenceMode: RequestEvidenceMode) {
-    setRequestForm((current) => ({
-      ...current,
-      evidenceMode,
-      templateId:
-        current.templateId === "freeform"
-          ? recommendRequestInputTemplateId(evidenceMode)
-          : current.templateId,
-    }));
-  }
-
-  function applySelectedRequestTemplate() {
-    setRequestForm((current) => ({
-      ...current,
-      detail: appendRequestInputTemplate(current.detail, current.templateId),
-    }));
     window.setTimeout(() => requestDetailRef.current?.focus(), 0);
   }
 
@@ -1396,13 +1390,18 @@ export function WorkflowControlPlane() {
         throw new Error("請先完成本機 Codex 連線並選擇本機專案。");
       }
 
+      if (!requestForm.deliveryMode) {
+        throw new Error("請先選擇交付方式。");
+      }
+
       if (selectedRepoPath !== currentWorker.repoPath) {
         await persistWorkerRepository(currentWorker.workerId, selectedRepoPath);
       }
 
       const interpretation = analyzeNaturalLanguageRequest(requestForm.detail);
+      const deliveryMode = requestForm.deliveryMode;
       const canUseSelectedWorkItem =
-        requestForm.deliveryMode === "draft_pr" &&
+        deliveryMode === "draft_pr" &&
         workerForm.autoCommitAndPr &&
         hasAzureWorkItemAccess &&
         requestForm.azureWorkItemId;
@@ -1427,9 +1426,9 @@ export function WorkflowControlPlane() {
             azureReferenceId: azureReference.id,
             azureReferenceEvidence,
             repoPath: selectedRepoPath,
-            deliveryMode: requestForm.deliveryMode,
-            evidenceMode: requestForm.evidenceMode,
-            templateId: requestForm.templateId,
+            deliveryMode,
+            evidenceMode: "standard",
+            templateId: "freeform",
             interpretation,
           }),
         },
@@ -1622,17 +1621,30 @@ export function WorkflowControlPlane() {
 
   async function recoverAgent(
     action: "retry_same_agent" | "clarify_and_retry",
+    options: { clarification?: string; includeRecoveryAttachments?: boolean } = {},
   ) {
     if (!selectedRequest || !stageGate?.blockedRunId) {
       return;
     }
 
     setState("loading");
-    setMessage("正在重跑同一個 Agent...");
+    setMessage(
+      options.clarification ? "正在送出快速確認..." : "正在重跑同一個 Agent...",
+    );
 
     try {
+      const clarification =
+        action === "clarify_and_retry"
+          ? (options.clarification ?? recoveryNote)
+          : "";
+      const includeRecoveryAttachments =
+        options.includeRecoveryAttachments ?? true;
       let clarificationAttachmentIds: string[] = [];
-      if (action === "clarify_and_retry" && recoveryAttachments.length > 0) {
+      if (
+        action === "clarify_and_retry" &&
+        includeRecoveryAttachments &&
+        recoveryAttachments.length > 0
+      ) {
         setMessage("正在上傳補件截圖...");
         const uploadedAttachments = await uploadRecoveryAttachments({
           requestId: selectedRequest.requestId,
@@ -1651,7 +1663,7 @@ export function WorkflowControlPlane() {
           body: JSON.stringify({
             action,
             runId: stageGate.blockedRunId,
-            clarification: recoveryNote,
+            clarification,
             clarificationAttachmentIds,
             actor: requestForm.owner || "control-plane",
           }),
@@ -1673,6 +1685,22 @@ export function WorkflowControlPlane() {
       setState("error");
       setMessage(formatError(error));
     }
+  }
+
+  async function submitQuickClarification(clarification: string) {
+    if (!clarificationDialogKey) {
+      return;
+    }
+
+    setDismissedClarificationDialogKey(clarificationDialogKey);
+    await recoverAgent("clarify_and_retry", {
+      clarification,
+      includeRecoveryAttachments: false,
+    });
+  }
+
+  function openQuickClarificationDialog() {
+    setDismissedClarificationDialogKey("");
   }
 
   async function syncAgentOutput() {
@@ -2167,6 +2195,20 @@ export function WorkflowControlPlane() {
             </div>
           </SetupDialog>
 
+          {stageGate?.clarificationPrompt && clarificationDialogKey ? (
+            <QuickClarificationDialog
+              loading={state === "loading"}
+              open={quickClarificationDialogOpen}
+              prompt={stageGate.clarificationPrompt}
+              onOpenChange={(open) => {
+                if (!open) {
+                  setDismissedClarificationDialogKey(clarificationDialogKey);
+                }
+              }}
+              onSubmit={submitQuickClarification}
+            />
+          ) : null}
+
           {canUseWorkflow ? (
             <WorkspaceTabs
               activeTab={activeWorkspaceTab}
@@ -2208,70 +2250,13 @@ export function WorkflowControlPlane() {
             icon={<Users className="h-4 w-4" />}
             title="新增需求"
           >
-            <div className="flex flex-wrap items-center gap-2">
-              <CompactSelectField
-                label="模板"
-                value={requestForm.templateId}
-                onChange={(templateId) =>
-                  setRequestForm((current) => ({
-                    ...current,
-                    templateId: templateId as RequestInputTemplateId,
-                  }))
-                }
-                options={REQUEST_INPUT_TEMPLATES.map((template) => ({
-                  label: template.label,
-                  value: template.id,
-                }))}
-              />
-              <Button
-                className="h-9 gap-2"
-                disabled={requestForm.templateId === "freeform"}
-                onClick={applySelectedRequestTemplate}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                <Plus className="h-4 w-4" />
-                套用
-              </Button>
-            </div>
-            <label className="flex flex-col gap-1">
-              <span className="text-xs font-semibold text-slate-600">
-                需求內容
-              </span>
-              <textarea
-                className="min-h-44 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm leading-6 outline-none focus:border-blue-500"
-                ref={requestDetailRef}
-                value={requestForm.detail}
-                onChange={(event) =>
-                  setRequestForm((current) => ({
-                    ...current,
-                    detail: event.target.value,
-                  }))
-                }
-                onPaste={handleRequestDetailPaste}
-                placeholder="例：會員搜尋需要新增 login name 篩選，保留既有篩選條件；可能需要確認 API 欄位。單號 795。"
-              />
-            </label>
-            <StagedAttachmentList
-              attachments={stagedAttachments}
-              onRemove={removeStagedAttachment}
-            />
-            <div className="flex flex-wrap gap-2">
-              <CompactChoiceControl
-                label="證據"
-                value={requestForm.evidenceMode}
-                options={[
-                  { label: "標準來源", value: "standard" },
-                  { label: "UI/視覺", value: "ui_only" },
-                ]}
-                onChange={(value) => setRequestEvidenceMode(value as RequestEvidenceMode)}
-              />
+            <div className="inline-grid w-fit max-w-full justify-items-start gap-2">
               <CompactChoiceControl
                 label="交付"
+                placeholder="請先選擇"
                 value={requestForm.deliveryMode}
                 options={[
-                  { label: "Draft PR", value: "draft_pr" },
+                  { label: "需要發PR", value: "draft_pr" },
                   { label: "不需要 PR", value: "no_pr" },
                 ]}
                 onChange={(value) =>
@@ -2281,7 +2266,37 @@ export function WorkflowControlPlane() {
                   }))
                 }
               />
+              <p className="text-xs leading-5 text-slate-500">
+                先選擇交付模式。
+              </p>
             </div>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-semibold text-slate-600">
+                需求內容
+              </span>
+              <textarea
+                className="min-h-44 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm leading-6 outline-none focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
+                disabled={!requestForm.deliveryMode}
+                ref={requestDetailRef}
+                value={requestForm.detail}
+                onChange={(event) =>
+                  setRequestForm((current) => ({
+                    ...current,
+                    detail: event.target.value,
+                  }))
+                }
+                onPaste={handleRequestDetailPaste}
+                placeholder={
+                  requestForm.deliveryMode
+                    ? "例：會員搜尋頁按下查詢沒有反應，附截圖；預期顯示符合 login name 的結果。單號 795。"
+                    : "請先選擇交付方式。"
+                }
+              />
+            </label>
+            <StagedAttachmentList
+              attachments={stagedAttachments}
+              onRemove={removeStagedAttachment}
+            />
             {requestForm.deliveryMode === "draft_pr" &&
             workerForm.autoCommitAndPr ? (
             <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
@@ -2323,7 +2338,7 @@ export function WorkflowControlPlane() {
             ) : null}
             <button
               className="mt-4 inline-flex items-center justify-center gap-2 rounded-md bg-blue-700 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300"
-              disabled={!requestForm.detail.trim()}
+              disabled={!requestForm.deliveryMode || !requestForm.detail.trim()}
               onClick={createWorkflowRequest}
               type="button"
             >
@@ -2485,6 +2500,7 @@ export function WorkflowControlPlane() {
                     worker={selectedWorker}
                     onChangeNote={setSelectedRecoveryNote}
                     onClarifyAndRetry={() => recoverAgent("clarify_and_retry")}
+                    onOpenQuickClarification={openQuickClarificationDialog}
                     onPasteAttachment={handleRecoveryNotePaste}
                     onRemoveAttachment={removeRecoveryAttachment}
                     onSelectAttachmentFiles={handleRecoveryAttachmentFileChange}
@@ -2541,6 +2557,165 @@ export function WorkflowControlPlane() {
       </div>
     </main>
   );
+}
+
+function QuickClarificationDialog({
+  loading,
+  open,
+  prompt,
+  onOpenChange,
+  onSubmit,
+}: {
+  loading: boolean;
+  open: boolean;
+  prompt: ClarificationPrompt;
+  onOpenChange: (open: boolean) => void;
+  onSubmit: (clarification: string) => Promise<void>;
+}) {
+  const promptKey = prompt.questions
+    .map((question) => `${question.id}:${question.options.map((option) => option.id).join(",")}`)
+    .join("|");
+  const defaultSelectedOptions = Object.fromEntries(
+    prompt.questions.map((question) => [
+      question.id,
+      question.options[0]?.id ?? "",
+    ]),
+  );
+  const [selectionState, setSelectionState] = useState<{
+    promptKey: string;
+    options: Record<string, string>;
+  }>({ promptKey: "", options: {} });
+  const selectedOptions =
+    selectionState.promptKey === promptKey
+      ? { ...defaultSelectedOptions, ...selectionState.options }
+      : defaultSelectedOptions;
+
+  const canSubmit = prompt.questions.every(
+    (question) =>
+      Boolean(selectedOptions[question.id]) &&
+      question.options.some((option) => option.id === selectedOptions[question.id]),
+  );
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>{prompt.title}</DialogTitle>
+          <DialogDescription>
+            {prompt.summary || "選完後會把答案補回同一個 Agent，讓它繼續確認範圍。"}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4">
+          {prompt.questions.map((question) => (
+            <div className="grid gap-2" key={question.id}>
+              <div className="text-sm font-semibold text-slate-900">
+                {question.question}
+              </div>
+              <div className="grid gap-2">
+                {question.options.map((option) => {
+                  const active = selectedOptions[question.id] === option.id;
+
+                  return (
+                    <button
+                      className={`flex w-full items-start justify-between gap-3 rounded-md border px-3 py-2 text-left text-sm ${
+                        active
+                          ? "border-blue-500 bg-blue-50 text-blue-950"
+                          : "border-slate-200 bg-white text-slate-700 hover:border-blue-200"
+                      }`}
+                      key={option.id}
+                      onClick={() =>
+                        setSelectionState((current) => ({
+                          promptKey,
+                          options: {
+                            ...(current.promptKey === promptKey
+                              ? current.options
+                              : {}),
+                            [question.id]: option.id,
+                          },
+                        }))
+                      }
+                      type="button"
+                    >
+                      <span className="min-w-0">
+                        <span className="block font-semibold">{option.label}</span>
+                        {option.description ? (
+                          <span className="mt-1 block text-xs leading-5 text-slate-500">
+                            {option.description}
+                          </span>
+                        ) : null}
+                      </span>
+                      {active ? (
+                        <Check className="mt-0.5 h-4 w-4 shrink-0 text-blue-700" />
+                      ) : null}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <DialogFooter>
+          <Button
+            disabled={loading}
+            onClick={() => onOpenChange(false)}
+            type="button"
+            variant="outline"
+          >
+            稍後處理
+          </Button>
+          <Button
+            className="gap-2"
+            disabled={!canSubmit || loading}
+            onClick={() =>
+              void onSubmit(buildQuickClarificationText(prompt, selectedOptions))
+            }
+            type="button"
+          >
+            {loading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Play className="h-4 w-4" />
+            )}
+            確認並續跑
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function buildQuickClarificationText(
+  prompt: ClarificationPrompt,
+  selectedOptions: Record<string, string>,
+) {
+  const lines = [
+    "快速確認：",
+    `主題：${prompt.title}`,
+    prompt.summary ? `原因：${prompt.summary}` : "",
+  ].filter(Boolean);
+
+  for (const question of prompt.questions) {
+    const option = question.options.find(
+      (candidate) => candidate.id === selectedOptions[question.id],
+    );
+    if (!option) {
+      continue;
+    }
+
+    lines.push(`- ${question.question}: ${option.label}`);
+    if (option.description) {
+      lines.push(`  ${option.description}`);
+    }
+    lines.push(`  ${option.clarification}`);
+  }
+
+  lines.push(
+    "請 Agent1 使用以上補充重新確認來源、範圍與 Allowed Files；不要再要求使用者重複回答同一個問題。",
+  );
+
+  return lines.join("\n");
 }
 
 function WorkspaceTabs({
@@ -3188,6 +3363,7 @@ function BlockerRecoveryPanel({
   worker,
   onChangeNote,
   onClarifyAndRetry,
+  onOpenQuickClarification,
   onPasteAttachment,
   onRemoveAttachment,
   onSelectAttachmentFiles,
@@ -3206,6 +3382,7 @@ function BlockerRecoveryPanel({
   worker: WorkerRegistration | null;
   onChangeNote: (value: string) => void;
   onClarifyAndRetry: () => void;
+  onOpenQuickClarification: () => void;
   onPasteAttachment: (event: ClipboardEvent<HTMLTextAreaElement>) => void;
   onRemoveAttachment: (attachmentId: string) => void;
   onSelectAttachmentFiles: (event: ChangeEvent<HTMLInputElement>) => void;
@@ -3288,6 +3465,24 @@ function BlockerRecoveryPanel({
       </div>
 
       <BlockerSummaryList items={stageGate.blockers} />
+
+      {stageGate.clarificationPrompt ? (
+        <div className="mt-3 flex flex-col gap-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm leading-6 text-blue-900 sm:flex-row sm:items-center sm:justify-between">
+          <span>
+            Agent1 已列出可選項，選完後會重跑同一個 Agent 繼續確認範圍。
+          </span>
+          <Button
+            className="w-full shrink-0 gap-2 sm:w-auto"
+            disabled={!canClarifyAndRetry || loading}
+            onClick={onOpenQuickClarification}
+            type="button"
+            variant="outline"
+          >
+            <Check className="h-4 w-4" />
+            快速選擇
+          </Button>
+        </div>
+      ) : null}
 
       {stageGate.recoveryKind === "stale_run" ? (
         <p className="mt-3 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm leading-6 text-blue-900">
@@ -3815,27 +4010,35 @@ function CompactChoiceControl({
   value,
   options,
   onChange,
+  placeholder = "請選擇",
 }: {
   label: string;
   value: string;
   options: Array<{ label: string; value: string }>;
   onChange: (value: string) => void;
+  placeholder?: string;
 }) {
   const [open, setOpen] = useState(false);
-  const selected = options.find((option) => option.value === value) ?? options[0];
+  const selected = options.find((option) => option.value === value);
 
   return (
     <Popover onOpenChange={setOpen} open={open}>
       <PopoverTrigger asChild>
-        <Button className="h-9 gap-2" type="button" variant="outline">
-          <span className="text-xs text-slate-500">{label}：</span>
-          <span>{selected.label}</span>
-          <ChevronsUpDown className="h-3.5 w-3.5 text-slate-400" />
+        <Button
+          className="h-9 w-fit max-w-full shrink gap-2 px-3"
+          type="button"
+          variant="outline"
+        >
+          <span className="shrink-0 text-xs text-slate-500">{label}：</span>
+          <span className="min-w-0 truncate">
+            {selected?.label ?? placeholder}
+          </span>
+          <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 text-slate-400" />
         </Button>
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        className="w-[min(20rem,calc(100vw-2rem))] p-1"
+        className="w-[var(--radix-popover-trigger-width)] max-w-[calc(100vw-2rem)] p-1"
         sideOffset={6}
       >
         {options.map((option) => {
@@ -5155,7 +5358,9 @@ function formatUiDeliveryMode(deliveryMode: DeliveryMode) {
 }
 
 function formatUiEvidenceMode(evidenceMode: RequestEvidenceMode) {
-  return evidenceMode === "ui_only" ? "小幅 UI/視覺修正" : "標準來源確認";
+  return evidenceMode === "ui_only"
+    ? "小幅 UI/視覺修正"
+    : "使用者敘述/截圖 + repo 驗證";
 }
 
 function formatAzureReferenceEvidenceBadge(request: WorkflowRequest) {

@@ -33,6 +33,9 @@ const BUG_TERMS = [
   "異常",
   "失敗",
   "無法",
+  "不能",
+  "沒反應",
+  "沒有反應",
   "壞",
 ];
 const REF_TERMS = ["refactor", "cleanup", "重構", "整理", "抽共用", "共用"];
@@ -123,6 +126,91 @@ const API_TERMS = [
   "請求",
 ];
 const QA_TERMS = ["qa", "testcase", "acceptance", "驗收", "測試案例"];
+const API_CONTRACT_TERMS = [
+  "api",
+  "endpoint",
+  "swagger",
+  "contract",
+  "schema",
+  "enum",
+  "response",
+  "request payload",
+  "api field",
+  "field mapping",
+  "端點",
+  "回傳",
+  "api 欄位",
+  "api欄位",
+  "欄位確認",
+  "欄位 mapping",
+];
+const PERMISSION_SOURCE_TERMS = [
+  "auth",
+  "permission",
+  "role",
+  "roles",
+  "role mapping",
+  "acl",
+  "權限",
+  "角色",
+  "授權",
+  "身分",
+];
+const DATA_SOURCE_TERMS = [
+  "data model",
+  "database",
+  "db",
+  "table",
+  "migration",
+  "persist",
+  "persistence",
+  "sync",
+  "資料模型",
+  "資料庫",
+  "資料表",
+  "同步",
+  "持久",
+  "儲存",
+];
+const BUSINESS_RULE_TERMS = [
+  "business rule",
+  "business logic",
+  "spec",
+  "policy",
+  "compliance",
+  "規格",
+  "商業規則",
+  "業務規則",
+  "業務邏輯",
+  "政策",
+  "合規",
+];
+const CROSS_SCREEN_TERMS = [
+  "workflow",
+  "flow",
+  "cross-screen",
+  "multi-page",
+  "navigation",
+  "router",
+  "流程",
+  "跨頁",
+  "導頁",
+  "路由",
+];
+const EXPECTATION_TERMS = [
+  "expected",
+  "actual",
+  "should",
+  "預期",
+  "實際",
+  "目前",
+  "現在",
+  "應該",
+  "要",
+  "無法",
+  "錯誤",
+  "異常",
+];
 export const WORKER_INTERPRETATION_START_MARKER =
   "CONTROL_PLANE_INTERPRETATION_START";
 export const WORKER_INTERPRETATION_END_MARKER =
@@ -141,15 +229,15 @@ export function analyzeNaturalLanguageRequest(
   const kind = inferKind(lower);
   const taskLevel = inferTaskLevel(lower, kind, normalized.length);
   const title = options.fallbackTitle?.trim() || inferTitle(normalized);
-  const missingSources = inferMissingSources(lower, kind);
+  const missingSources = inferMissingSources(lower, kind, normalized);
   const riskFlags = inferRiskFlags(lower);
   const sourceWarnings = [
-    "User text is intake evidence only, not confirmed Spec/API/Figma/QA.",
+    "User text, screenshots, and selected-repo inspection may be sufficient for low-risk bug fixes or scoped branch adjustments.",
   ];
 
   if (!hasAnyTerm(lower, QA_TERMS)) {
     sourceWarnings.push(
-      "No QA TestCase was detected; verification must remain provisional until QA confirms it.",
+      "No QA TestCase was detected; Agent1 may define a provisional verification checklist from the observed behavior and repo tests.",
     );
   }
 
@@ -164,8 +252,8 @@ export function analyzeNaturalLanguageRequest(
     sourceWarnings,
     riskFlags,
     guardrails: [
-      "Do not invent requirements, API fields, UI behavior, QA criteria, or implementation scope.",
-      "Agent1 must confirm sources before implementation scope is treated as valid.",
+      "Do not invent API fields, permission behavior, data model changes, business rules, or expanded workflows.",
+      "Agent1 may confirm low-risk bug or branch-adjustment scope from user text, screenshots, and repository inspection.",
       "Stop for source conflict, scope expansion, Azure write, worker failure, or high-risk operation.",
     ],
     updatedAt: new Date().toISOString(),
@@ -327,25 +415,35 @@ function inferTaskLevel(
   return "Level 2";
 }
 
-function inferMissingSources(lower: string, kind: RequestKind) {
+function inferMissingSources(
+  lower: string,
+  kind: RequestKind,
+  detail: string,
+) {
   const missing = new Set<string>();
-  missing.add("Spec / business rule confirmation");
-  missing.add("Existing code ownership and affected area");
 
-  if (hasAnyTerm(lower, UI_TERMS)) {
-    missing.add("Figma / UI behavior source");
+  if (!hasActionableTargetAndExpectation(lower, detail)) {
+    missing.add("Target surface and expected behavior");
   }
 
-  if (hasAnyTerm(lower, API_TERMS)) {
+  if (hasAnyTerm(lower, API_CONTRACT_TERMS)) {
     missing.add("Swagger / API contract source");
   }
 
-  if (kind === "BUG") {
-    missing.add("Reproduction steps and expected behavior");
+  if (hasAnyTerm(lower, PERMISSION_SOURCE_TERMS)) {
+    missing.add("Permission / role mapping source");
   }
 
-  if (!hasAnyTerm(lower, QA_TERMS)) {
-    missing.add("QA TestCase or provisional verification checklist");
+  if (hasAnyTerm(lower, DATA_SOURCE_TERMS)) {
+    missing.add("Data model / persistence source");
+  }
+
+  if (hasAnyTerm(lower, BUSINESS_RULE_TERMS)) {
+    missing.add("Spec / business rule confirmation");
+  }
+
+  if (hasAnyTerm(lower, CROSS_SCREEN_TERMS)) {
+    missing.add("Cross-screen workflow source");
   }
 
   return [...missing];
@@ -391,11 +489,27 @@ function buildSummary(
     return `${kind} classified as ${taskLevel}; human attention may be required before implementation.`;
   }
 
-  return `${kind} classified as ${taskLevel}; Agent1 should confirm sources before implementation.`;
+  return `${kind} classified as ${taskLevel}; Agent1 should confirm scope from user evidence and repository inspection before implementation.`;
 }
 
 function hasAnyTerm(value: string, terms: string[]) {
   return terms.some((term) => value.includes(term));
+}
+
+function hasActionableTargetAndExpectation(lower: string, detail: string) {
+  const normalized = detail.replace(/\s+/g, "");
+  if (normalized.length < 12) {
+    return false;
+  }
+
+  const hasTarget =
+    hasAnyTerm(lower, UI_TERMS) ||
+    hasAnyTerm(lower, API_CONTRACT_TERMS) ||
+    hasAnyTerm(lower, ["branch", "file", "component", "page", "repo", "分支", "檔案", "頁面", "元件", "畫面"]);
+  const hasExpectation =
+    hasAnyTerm(lower, EXPECTATION_TERMS) || normalized.length >= 28;
+
+  return hasTarget && hasExpectation;
 }
 
 function sanitizeStringArray(value: unknown) {
@@ -421,13 +535,13 @@ function defaultInterpretation(): RequestInterpretation {
     taskLevel: "Level 2",
     summary: "Request is waiting for Local Worker/Codex interpretation.",
     suggestedNextAgent: "agent0",
-    missingSources: ["Spec / business rule confirmation"],
+    missingSources: ["Target surface and expected behavior"],
     sourceWarnings: [
-      "User text is intake evidence only, not confirmed Spec/API/Figma/QA.",
+      "User text, screenshots, and selected-repo inspection may be sufficient for low-risk bug fixes or scoped branch adjustments.",
     ],
     riskFlags: [],
     guardrails: [
-      "Agent1 must confirm sources before implementation scope is treated as valid.",
+      "Agent1 may confirm low-risk bug or branch-adjustment scope from user text, screenshots, and repository inspection.",
     ],
     updatedAt: new Date().toISOString(),
   };

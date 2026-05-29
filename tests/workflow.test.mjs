@@ -5,6 +5,7 @@ const {
   buildWorkflowAgentPacket,
   createWorkflowRequestFromInput,
   evaluateWorkflowStageGate,
+  extractClarificationPromptFromArtifact,
   getNextAgentRole,
   getStageAfterCompletedAgent,
   getStageForQueuedAgent,
@@ -94,7 +95,7 @@ test("workflow packet maps Azure Work Item reference to user-facing 單號", () 
   assert.match(packet, /Input Template: freeform/);
   assert.match(packet, /Tracking reference only/);
   assert.match(packet, /## User Request/);
-  assert.match(packet, /User request is intake evidence only/);
+  assert.match(packet, /intake evidence for Agent1 to validate with repository inspection/);
   assert.doesNotMatch(packet, /Task Package and Implementation Result/);
 });
 
@@ -159,13 +160,34 @@ test("UI-only visual evidence mode narrows Agent1 source requirements", () => {
   assert.match(packet, /## UI-only Visual Evidence Mode/);
   assert.match(
     packet,
-    /Do not block solely for missing Figma, Swagger, or a formal spec/,
+    /Do not block solely because there is no new Figma, formal spec, Swagger, or QA TestCase/,
   );
   assert.match(
     packet,
-    /Block only for unclear API fields, permissions, data source, role mapping, business rules/,
+    /Require external confirmed source only for new or changed API fields\/contracts, permission or role mapping, data model or persistence, business rules/,
   );
-  assert.match(packet, /limited visual evidence/);
+  assert.match(packet, /legacy UI-only marker narrows scope further/);
+});
+
+test("standard Agent1 packet allows user evidence and repo inspection for low-risk fixes", () => {
+  const packet = buildWorkflowAgentPacket(
+    sampleRequest({
+      detail: "會員搜尋頁面按下查詢沒有反應，附截圖；預期顯示符合 login name 的結果。",
+      azureReferenceType: "none",
+      azureReferenceId: "",
+    }),
+    "agent1",
+    [],
+  );
+
+  assert.match(packet, /User text, screenshots, and selected-repo inspection can be sufficient evidence/);
+  assert.match(packet, /Do not block solely because there is no new Figma, formal spec, Swagger, or QA TestCase/);
+  assert.match(packet, /inspect selected-repo project docs, app folders, routes, pages, and likely components/);
+  assert.match(packet, /Use repository inspection to confirm existing code ownership/);
+  assert.match(packet, /CONTROL_PLANE_CLARIFICATION_PROMPT_START/);
+  assert.match(packet, /"questions"/);
+  assert.match(packet, /logout button/);
+  assert.doesNotMatch(packet, /User request is intake evidence only/);
 });
 
 test("blocker summaries translate common Agent1 English blockers", () => {
@@ -220,6 +242,23 @@ test("blocker summaries merge UI-only target and expectation gaps", () => {
   assert.match(summaries[0].original, /target surface/);
 });
 
+test("blocker summaries explain multi-target and placement choices plainly", () => {
+  const summaries = summarizeStageGateBlockers([
+    [
+      "Agent1 source check cannot proceed: - Which target surface should receive `MJ`: `apps/admin-agent-web` topbar, `apps/admin-hq-web` topbar, or `apps/trader-web` header?",
+      "- Should `MJ` appear after the existing rightmost logout button, or immediately before it while keeping logout as the final control?",
+      "- Blocker: repository inspection confirms multiple plausible top menu/header implementations.",
+    ].join("\n"),
+  ]);
+
+  assert.deepEqual(
+    summaries.map((summary) => summary.title),
+    ["需要選擇目標子專案或畫面", "需要確認放置位置"],
+  );
+  assert.match(summaries[0].nextAction, /admin-agent/);
+  assert.match(summaries[1].reason, /登出按鈕後面/);
+});
+
 test("Agent1 packet requires a source check schema with file scope and non-scope", () => {
   const packet = buildWorkflowAgentPacket(sampleRequest(), "agent1", [
     sampleRun({
@@ -236,6 +275,39 @@ test("Agent1 packet requires a source check schema with file scope and non-scope
   assert.match(packet, /## Do Not Touch/);
   assert.match(packet, /## Task Package For Agent2/);
   assert.match(packet, /file boundaries/);
+});
+
+test("stage gate parses Agent1 quick clarification prompt", () => {
+  const blockedRun = sampleRun({
+    runId: "agent1-multi-candidate",
+    agentRole: "agent1",
+    status: "blocked",
+    artifact: sampleClarificationPromptArtifact(),
+    error:
+      "Agent1 source check cannot proceed: Which target surface should receive MJ?",
+  });
+  const stageGate = evaluateWorkflowStageGate({
+    request: sampleRequest({ status: "blocked" }),
+    runs: [blockedRun],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(stageGate.status, "blocked");
+  assert.equal(stageGate.needsClarification, true);
+  assert.equal(stageGate.clarificationPrompt?.title, "選擇目標子專案");
+  assert.equal(stageGate.clarificationPrompt?.questions.length, 2);
+  assert.equal(
+    stageGate.clarificationPrompt?.questions[0].options
+      .map((option) => option.id)
+      .join(","),
+    "admin-agent,admin-hq,trader",
+  );
+
+  const prompt = extractClarificationPromptFromArtifact(
+    sampleClarificationPromptArtifact(),
+  );
+  assert.equal(prompt?.questions[1].id, "placement");
 });
 
 test("Agent2 packet flags incomplete Agent1 handoff instead of filling gaps", () => {
@@ -410,6 +482,90 @@ test("workflow no-PR delivery is tracked as completed after Agent3 review", () =
     "agent3",
   );
 });
+
+function sampleClarificationPromptArtifact() {
+  return [
+    "# Source Check Report",
+    "",
+    "## Confirmed Requirements",
+    "- Add literal text `MJ` to a top menu bar.",
+    "",
+    "## Confirmed Scope",
+    "- Source confirmation only until target is selected.",
+    "",
+    "## Allowed Files",
+    "- none",
+    "",
+    "## Non-Scope",
+    "- Do not change multiple apps.",
+    "",
+    "## Do Not Touch",
+    "- package.json",
+    "",
+    "## Blocking Questions",
+    "- Which target surface should receive `MJ`: admin-agent, admin-hq, or trader?",
+    "- Should `MJ` appear after logout, or before logout while logout remains final?",
+    "",
+    "## Can Proceed",
+    "no",
+    "",
+    "## Task Package For Agent2",
+    "- blocked until target and placement are confirmed.",
+    "",
+    "CONTROL_PLANE_CLARIFICATION_PROMPT_START",
+    JSON.stringify({
+      title: "選擇目標子專案",
+      summary: "repo 裡有三個 topbar/header 候選，需要先選要改哪一個。",
+      questions: [
+        {
+          id: "target_surface",
+          question: "要改哪個子專案？",
+          options: [
+            {
+              id: "admin-agent",
+              label: "admin-agent",
+              description: "apps/admin-agent-web / AgentTopBar",
+              clarification:
+                "目標子專案：apps/admin-agent-web；目標元件：AgentTopBar。",
+            },
+            {
+              id: "admin-hq",
+              label: "admin-hq",
+              description: "apps/admin-hq-web / HqTopBar",
+              clarification: "目標子專案：apps/admin-hq-web；目標元件：HqTopBar。",
+            },
+            {
+              id: "trader",
+              label: "trader",
+              description: "apps/trader-web / TraderShell header",
+              clarification:
+                "目標子專案：apps/trader-web；目標元件：TraderShell header。",
+            },
+          ],
+        },
+        {
+          id: "placement",
+          question: "MJ 要放在哪裡？",
+          options: [
+            {
+              id: "after-logout",
+              label: "登出後面",
+              description: "MJ 成為最右側內容",
+              clarification: "放置位置：MJ 放在登出按鈕後面，成為最右側內容。",
+            },
+            {
+              id: "before-logout",
+              label: "登出前面",
+              description: "登出仍維持最右側",
+              clarification: "放置位置：MJ 放在登出按鈕前面，登出仍維持最右側。",
+            },
+          ],
+        },
+      ],
+    }),
+    "CONTROL_PLANE_CLARIFICATION_PROMPT_END",
+  ].join("\n");
+}
 
 function sampleRequest(overrides = {}) {
   return {

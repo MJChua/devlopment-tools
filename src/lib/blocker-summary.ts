@@ -105,6 +105,45 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
   }
 
   if (
+    (normalized.includes("multiple plausible") ||
+      normalized.includes("multiple candidate") ||
+      normalized.includes("repository inspection found multiple") ||
+      normalized.includes("apps/admin-agent-web") ||
+      normalized.includes("apps/admin-hq-web") ||
+      normalized.includes("apps/trader-web")) &&
+    (normalized.includes("target surface") ||
+      normalized.includes("topbar") ||
+      normalized.includes("header") ||
+      normalized.includes("screen"))
+  ) {
+    return {
+      title: "需要選擇目標子專案或畫面",
+      reason:
+        "Agent1 已經在 repo 裡找到多個合理位置，不能自己猜要改哪一個，否則可能改錯子專案或頁面。",
+      nextAction:
+        "直接選一個目標，例如 admin-agent、admin-hq、trader，或補上明確 app/page/component。",
+      original,
+    };
+  }
+
+  if (
+    normalized.includes("logout") &&
+    (normalized.includes("after") ||
+      normalized.includes("before") ||
+      normalized.includes("rightmost") ||
+      normalized.includes("final control"))
+  ) {
+    return {
+      title: "需要確認放置位置",
+      reason:
+        "Agent1 不確定新內容要放在登出按鈕後面成為最右側，還是放在登出按鈕前面並保留登出為最後一個控制項。",
+      nextAction:
+        "補一句位置決定，例如「MJ 放在登出後面」或「MJ 放在登出前面」。",
+      original,
+    };
+  }
+
+  if (
     normalized.includes("which exact app/page/component") ||
     normalized.includes("target app") ||
     normalized.includes("target surface") ||
@@ -112,10 +151,16 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
     normalized.includes("expected visual correction") ||
     normalized.includes("ui-only visual evidence mode")
   ) {
+    const isVisualOnly =
+      normalized.includes("ui-only") ||
+      normalized.includes("visual evidence") ||
+      normalized.includes("visually check") ||
+      normalized.includes("expected visual");
     return {
-      title: "缺少 UI 目標與期望結果",
-      reason:
-        "這筆需求已標記為 UI-only，但 Agent1 還不知道要檢查或修改哪個 app/page/component/URL，也沒有可確認的預期畫面結果。",
+      title: isVisualOnly ? "缺少 UI 目標與期望結果" : "缺少目標畫面或元件",
+      reason: isVisualOnly
+        ? "這筆需求已標記為 UI-only，但 Agent1 還不知道要檢查或修改哪個 app/page/component/URL，也沒有可確認的預期畫面結果。"
+        : "Agent1 需要知道實際要改哪個 app/page/component/URL，才能限制 Agent2 的檔案範圍並避免改錯地方。",
       nextAction:
         "補上目標 app/page/component/URL，以及預期 copy、顏色、間距、位置、簡單狀態樣式或截圖。",
       original,
@@ -128,11 +173,11 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
     normalized.includes("api")
   ) {
     return {
-      title: "缺少設計或 API 來源",
+      title: "缺少外部契約或高風險來源",
       reason:
-        "這類變更可能牽涉設計規格、API 欄位或資料語意，Agent1 需要來源避免自行推測。",
+        "只有牽涉 API、權限、資料、商業規則或跨頁流程時，Agent1 才需要外部來源避免自行推測。",
       nextAction:
-        "補上 Figma、Swagger、PR、Work Item 或可驗證截圖；UI-only 只適用於受限的視覺修改。",
+        "補上最小必要 API/權限/資料來源；一般 bug 或視覺修正補目標、預期結果、截圖或重現描述即可。",
       original,
     };
   }

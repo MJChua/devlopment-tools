@@ -368,7 +368,7 @@ test("request image attachments are stored and included in Agent0 and Agent1 pac
   const agent0 = dispatchNextAgent({ requestId: request.requestId });
   assert.match(agent0.packet, /## User Attachments/);
   assert.match(agent0.packet, /screen\.png \(image\/png, 4 bytes\)/);
-  assert.match(agent0.packet, /intake evidence only/);
+  assert.match(agent0.packet, /intake evidence for Agent1 to validate/);
 
   completeWorkerRun(worker.workerId, worker.token, agent0.runId, {
     status: "completed",
@@ -696,6 +696,83 @@ test("Agent1 Can Proceed no blocks without schema auto-repair", async () => {
   assert.equal(stageGate.recoveryKind, "agent_blocked");
 });
 
+test("Agent1 quick clarification selection retries same agent", async () => {
+  const {
+    completeWorkerRun,
+    createRequest,
+    dispatchNextAgent,
+    getRequestDetail,
+    getStageGate,
+    recoverWorkflowRequest,
+    registerWorker,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+
+  const suffix = randomUUID();
+  const worker = registerWorker({
+    workerId: `worker-quick-clarification-${suffix}`,
+    displayName: "Quick Clarification Worker",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = "C:\\workspace\\repo-quick-clarification";
+
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "repo-quick-clarification", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+
+  const request = createRequest({
+    detail: '於 top menu bar 最右側新增字樣 "MJ"',
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+  });
+  const agent0 = dispatchNextAgent({ requestId: request.requestId });
+  completeWorkerRun(worker.workerId, worker.token, agent0.runId, {
+    status: "completed",
+    commandOutput: "ok",
+    diffSummary: "clean",
+    artifact: "# Agent0",
+  });
+
+  const agent1 = getRun(getRequestDetail(request.requestId), "agent1");
+  completeWorkerRun(worker.workerId, worker.token, agent1.runId, {
+    status: "completed",
+    commandOutput: "ok",
+    diffSummary: "clean",
+    artifact: sampleMultiCandidateSourceCheckArtifact(),
+  });
+
+  const stageGate = getStageGate(request.requestId);
+  assert.equal(stageGate.clarificationPrompt?.title, "選擇目標子專案");
+  assert.equal(stageGate.clarificationPrompt?.questions[0].options.length, 3);
+
+  const retry = recoverWorkflowRequest({
+    requestId: request.requestId,
+    runId: agent1.runId,
+    action: "clarify_and_retry",
+    clarification:
+      "快速確認：\n- 要改哪個子專案？: admin-agent\n  目標子專案：apps/admin-agent-web；目標元件：AgentTopBar。",
+  });
+
+  assert.equal(retry.agentRole, "agent1");
+  assert.equal(retry.retryOfRunId, agent1.runId);
+  assert.equal(retry.dispatchReason, "clarification_retry");
+  assert.match(retry.packet, /Operator clarification/);
+  assert.match(retry.packet, /apps\/admin-agent-web/);
+});
+
 test("schema-blocked run can synchronize valid handoff from command output", async () => {
   const {
     completeWorkerRun,
@@ -1019,6 +1096,73 @@ function sampleBlockedSourceCheckArtifact() {
     "",
     "## Task Package For Agent2",
     "- blocked; do not implement until source is confirmed.",
+  ].join("\n");
+}
+
+function sampleMultiCandidateSourceCheckArtifact() {
+  return [
+    "# Source Check Report",
+    "",
+    "## Confirmed Requirements",
+    "- Add literal text `MJ` to a top menu bar.",
+    "",
+    "## Confirmed Scope",
+    "- Source confirmation only until target and placement are confirmed.",
+    "",
+    "## Allowed Files",
+    "- none",
+    "",
+    "## Non-Scope",
+    "- Do not modify more than one app.",
+    "",
+    "## Do Not Touch",
+    "- package.json",
+    "- .env files",
+    "",
+    "## Blocking Questions",
+    "- Which target surface should receive `MJ`: admin-agent, admin-hq, or trader?",
+    "- Should `MJ` appear after logout, or before logout while logout remains final?",
+    "",
+    "## Can Proceed",
+    "no",
+    "",
+    "## Task Package For Agent2",
+    "- blocked until the target surface and placement are confirmed.",
+    "",
+    "CONTROL_PLANE_CLARIFICATION_PROMPT_START",
+    JSON.stringify({
+      title: "選擇目標子專案",
+      summary: "repo 裡有三個 topbar/header 候選，需要先選要改哪一個。",
+      questions: [
+        {
+          id: "target_surface",
+          question: "要改哪個子專案？",
+          options: [
+            {
+              id: "admin-agent",
+              label: "admin-agent",
+              description: "apps/admin-agent-web / AgentTopBar",
+              clarification:
+                "目標子專案：apps/admin-agent-web；目標元件：AgentTopBar。",
+            },
+            {
+              id: "admin-hq",
+              label: "admin-hq",
+              description: "apps/admin-hq-web / HqTopBar",
+              clarification: "目標子專案：apps/admin-hq-web；目標元件：HqTopBar。",
+            },
+            {
+              id: "trader",
+              label: "trader",
+              description: "apps/trader-web / TraderShell header",
+              clarification:
+                "目標子專案：apps/trader-web；目標元件：TraderShell header。",
+            },
+          ],
+        },
+      ],
+    }),
+    "CONTROL_PLANE_CLARIFICATION_PROMPT_END",
   ].join("\n");
 }
 

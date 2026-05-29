@@ -9,18 +9,29 @@ const {
   inferTitle,
 } = await import("../src/lib/request-analysis.ts");
 
-test("request analysis infers bug kind, level, title, and missing sources", () => {
+test("request analysis lets low-risk bug reports use user evidence and repo inspection", () => {
   const analysis = analyzeNaturalLanguageRequest(
-    "會員搜尋頁面無法用 login name 查詢，Work Item 795，可能需要 API 欄位確認。",
+    "會員搜尋頁面按下查詢沒有反應，附截圖；預期顯示符合 login name 的結果。",
   );
 
   assert.equal(analysis.kind, "BUG");
   assert.equal(analysis.source, "provisional");
   assert.equal(analysis.taskLevel, "Level 1");
   assert.match(analysis.title, /會員搜尋頁面/);
-  assert(analysis.missingSources.includes("Swagger / API contract source"));
-  assert(analysis.missingSources.includes("Figma / UI behavior source"));
+  assert.deepEqual(analysis.missingSources, []);
+  assert.match(analysis.sourceWarnings.join("\n"), /repo inspection/);
   assert.equal(analysis.riskFlags.length, 0);
+});
+
+test("request analysis still asks for external contracts for API changes", () => {
+  const analysis = analyzeNaturalLanguageRequest(
+    "會員搜尋頁面需要新增 login name 篩選，可能需要 API 欄位確認。",
+  );
+
+  assert.equal(analysis.kind, "REQ");
+  assert(analysis.missingSources.includes("Swagger / API contract source"));
+  assert(!analysis.missingSources.includes("Figma / UI behavior source"));
+  assert(!analysis.missingSources.includes("QA TestCase or provisional verification checklist"));
 });
 
 test("request analysis extracts worker/Codex interpretation markers", () => {

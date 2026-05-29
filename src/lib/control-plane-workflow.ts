@@ -81,6 +81,22 @@ export type StageGateRecoveryKind =
   | "agent_blocked"
   | "stale_run"
   | "human_decision";
+export type ClarificationPromptOption = {
+  id: string;
+  label: string;
+  description: string;
+  clarification: string;
+};
+export type ClarificationPromptQuestion = {
+  id: string;
+  question: string;
+  options: ClarificationPromptOption[];
+};
+export type ClarificationPrompt = {
+  title: string;
+  summary: string;
+  questions: ClarificationPromptQuestion[];
+};
 
 export type WorkflowRequestInput = {
   kind?: RequestKind;
@@ -235,6 +251,7 @@ export type StageGateResult = {
   blockers: string[];
   nextActions: string[];
   humanDecisions: string[];
+  clarificationPrompt: ClarificationPrompt | null;
   blockedRunId: string;
   blockedAgentRole: AgentRole | null;
   recoveryKind: StageGateRecoveryKind;
@@ -248,6 +265,8 @@ export const RUN_HEARTBEAT_STALE_MS = 10 * 60 * 1000;
 const HANDOFF_SECTION_MAX_CHARS = 900;
 const HANDOFF_FALLBACK_MAX_CHARS = 1200;
 const HANDOFF_TOTAL_MAX_CHARS = 3600;
+const CLARIFICATION_PROMPT_START = "CONTROL_PLANE_CLARIFICATION_PROMPT_START";
+const CLARIFICATION_PROMPT_END = "CONTROL_PLANE_CLARIFICATION_PROMPT_END";
 const HANDOFF_SECTION_HEADINGS = [
   "Confirmed Requirements",
   "Confirmed Scope",
@@ -537,7 +556,7 @@ function buildAgent0PacketBody(
     "",
     request.evidenceMode === "ui_only"
       ? "- User text and screenshots are limited visual evidence only; do not expand them into API, permission, data-model, persistence, or business-rule requirements."
-      : "- User request is intake evidence only.",
+      : "- User request text and screenshots are intake evidence for Agent1 to validate with repository inspection.",
     "- Do not confirm Spec, API, Figma, QA, or implementation scope.",
     "- Do not write Azure or local repository state.",
   ];
@@ -576,7 +595,7 @@ function buildAgent1PacketBody(
     "```markdown",
     "# Source Check Report",
     "## Confirmed Requirements",
-    "- List only requirements verified from confirmed sources.",
+    "- List requirements verified from user text, screenshots, repository inspection, or confirmed external sources.",
     "## Confirmed Scope",
     "- List the behavior or code areas that are in scope.",
     "## Allowed Files",
@@ -586,7 +605,7 @@ function buildAgent1PacketBody(
     "## Do Not Touch",
     "- List protected files, shared modules, env/config, generated files, or unknown areas.",
     "## Blocking Questions",
-    "- List missing or conflicting source evidence; use '- none' only when verified.",
+    "- List missing or conflicting source evidence; do not list missing Figma/spec/Swagger/QA as blockers unless the risk rules below require external confirmation.",
     "## Can Proceed",
     "yes/no",
     "## Task Package For Agent2",
@@ -594,18 +613,41 @@ function buildAgent1PacketBody(
     "- If Can Proceed is no, write 'blocked' and explain the blocker.",
     "```",
     "",
+    "When Can Proceed is no only because multiple concrete repo candidates or placement choices are plausible, append this exact machine-readable block after the report:",
+    "",
+    CLARIFICATION_PROMPT_START,
+    "{",
+    '  "title": "短標題，例如：選擇目標子專案",',
+    '  "summary": "白話說明為什麼需要使用者選擇。",',
+    '  "questions": [',
+    "    {",
+    '      "id": "target_surface",',
+    '      "question": "要改哪個子專案、頁面或元件？",',
+    '      "options": [',
+    '        { "id": "admin-agent", "label": "admin-agent", "description": "apps/admin-agent-web / AgentTopBar", "clarification": "目標子專案：apps/admin-agent-web；目標元件：AgentTopBar。" },',
+    '        { "id": "admin-hq", "label": "admin-hq", "description": "apps/admin-hq-web / HqTopBar", "clarification": "目標子專案：apps/admin-hq-web；目標元件：HqTopBar。" }',
+    "      ]",
+    "    }",
+    "  ]",
+    "}",
+    CLARIFICATION_PROMPT_END,
+    "",
     "## Rules",
     "",
-    request.evidenceMode === "ui_only"
-      ? "- User text and screenshots can be sufficient limited visual evidence when they define the target surface, expected visual result, and allowed visual scope."
-      : "- User request is intake evidence only.",
+    "- User text, screenshots, and selected-repo inspection can be sufficient evidence for low-risk bug fixes, UI corrections, and scoped branch adjustments when they define the target surface, observed problem or current state, expected result, and allowed scope.",
+    "- Do not block solely because there is no new Figma, formal spec, Swagger, or QA TestCase.",
+    "- Before blocking for an unclear target, inspect selected-repo project docs, app folders, routes, pages, and likely components to find concrete candidates.",
+    "- Use repository inspection to confirm existing code ownership, affected files, and current behavior before defining Agent2's allowed file scope.",
+    "- If repository inspection finds exactly one reasonable low-risk target, fill Confirmed Requirements, Confirmed Scope, Allowed Files, Non-Scope, and Do Not Touch instead of blocking.",
+    "- If repository inspection finds multiple plausible targets, do not say only 'target unclear'. Name each candidate, explain why it is plausible, and provide the structured clarification block above.",
+    "- If placement is ambiguous, state the concrete choices in Blocking Questions, such as whether new text should appear after the logout button or before it while logout remains the final control.",
+    "- Require external confirmed source only for new or changed API fields/contracts, permission or role mapping, data model or persistence, business rules, analytics, cross-screen workflow, package installation, Azure writes, merge, deploy, or scope expansion.",
     ...(request.evidenceMode === "ui_only"
       ? [
-          "- Do not block solely for missing Figma, Swagger, or a formal spec for copy, color, spacing, placement, or simple visual state changes.",
-          "- Block only for unclear API fields, permissions, data source, role mapping, business rules, persistence, cross-screen workflow, or scope expansion; ask the smallest necessary clarification.",
+          "- This legacy UI-only marker narrows scope further to copy, color, spacing, placement, and simple visual state changes.",
         ]
       : []),
-    "- Stop on missing critical source, source conflict, or scope expansion.",
+    "- Stop on unclear target or expected result, missing critical external source under the risk rules above, source conflict, or scope expansion.",
     "- Do not invent requirements, API fields, UI behavior, QA criteria, or implementation scope.",
   ];
 }
@@ -631,7 +673,7 @@ function buildUserAttachmentsSection(
     "",
     evidenceMode === "ui_only"
       ? "- These files are limited visual evidence for UI-only copy, color, spacing, placement, and simple visual states. They do not confirm API, permissions, data model, persistence, or business rules."
-      : "- These files are intake evidence only. They do not confirm Spec, API, Figma, QA, or implementation scope.",
+      : "- These files are user-provided intake evidence. Agent1 may use screenshots to confirm observed UI state and expected result for low-risk scoped fixes, but they do not confirm API, permissions, data model, persistence, or business rules.",
     ...intakeAttachments.map(
       (attachment) =>
         `- ${attachment.filename} (${attachment.contentType}, ${attachment.sizeBytes} bytes): ${attachment.storagePath}`,
@@ -918,6 +960,149 @@ export function getAgentHandoffBlocker(
   return `Agent1 source check cannot proceed: ${clipHandoffText(summary || canProceed, 900)}`;
 }
 
+export function extractClarificationPromptFromArtifact(
+  artifact: string,
+): ClarificationPrompt | null {
+  const match = artifact.match(
+    new RegExp(
+      `${CLARIFICATION_PROMPT_START}\\s*([\\s\\S]*?)\\s*${CLARIFICATION_PROMPT_END}`,
+      "i",
+    ),
+  );
+  if (!match?.[1]) {
+    return null;
+  }
+
+  try {
+    return normalizeClarificationPrompt(JSON.parse(match[1]));
+  } catch {
+    return null;
+  }
+}
+
+function normalizeClarificationPrompt(value: unknown): ClarificationPrompt | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const rawQuestions = Array.isArray(value.questions)
+    ? value.questions
+    : value.question && Array.isArray(value.options)
+      ? [value]
+      : [];
+  const questions = rawQuestions
+    .map(normalizeClarificationQuestion)
+    .filter((question): question is ClarificationPromptQuestion =>
+      Boolean(question),
+    )
+    .slice(0, 3);
+
+  if (questions.length === 0) {
+    return null;
+  }
+
+  return {
+    title: normalizePromptString(value.title, 80) || "需要快速確認",
+    summary: normalizePromptText(value.summary, 240),
+    questions,
+  };
+}
+
+function normalizeClarificationQuestion(
+  value: unknown,
+  questionIndex: number,
+): ClarificationPromptQuestion | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const question = normalizePromptString(value.question, 160);
+  const rawOptions = Array.isArray(value.options) ? value.options : [];
+  const options = rawOptions
+    .map((option, optionIndex) =>
+      normalizeClarificationOption(option, question, optionIndex),
+    )
+    .filter((option): option is ClarificationPromptOption => Boolean(option))
+    .slice(0, 6);
+
+  if (!question || options.length < 2) {
+    return null;
+  }
+
+  const fallbackId = `question-${questionIndex + 1}`;
+  return {
+    id:
+      normalizePromptId(value.id) ||
+      normalizePromptId(question) ||
+      fallbackId,
+    question,
+    options,
+  };
+}
+
+function normalizeClarificationOption(
+  value: unknown,
+  question: string,
+  optionIndex: number,
+): ClarificationPromptOption | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const label = normalizePromptString(value.label, 80);
+  if (!label) {
+    return null;
+  }
+
+  const description = normalizePromptText(value.description, 180);
+  const clarification =
+    normalizePromptText(value.clarification, 260) ||
+    `${question}: ${label}${description ? ` (${description})` : ""}`;
+
+  return {
+    id:
+      normalizePromptId(value.id) ||
+      normalizePromptId(label) ||
+      `option-${optionIndex + 1}`,
+    label,
+    description,
+    clarification,
+  };
+}
+
+function normalizePromptString(value: unknown, maxChars: number) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  return value.replace(/\s+/g, " ").trim().slice(0, maxChars).trim();
+}
+
+function normalizePromptText(value: unknown, maxChars: number) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  return value.replace(/\r\n/g, "\n").trim().slice(0, maxChars).trim();
+}
+
+function normalizePromptId(value: unknown) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 export function mergeStructuredAgentReport(
   agentRole: AgentRole,
   artifact: string,
@@ -1083,6 +1268,7 @@ function stageGateResult(
     | "canAutoRepair"
     | "canManualRetry"
     | "needsClarification"
+    | "clarificationPrompt"
   > &
     Partial<
       Pick<
@@ -1093,6 +1279,7 @@ function stageGateResult(
         | "canAutoRepair"
         | "canManualRetry"
         | "needsClarification"
+        | "clarificationPrompt"
       >
     >,
 ): StageGateResult {
@@ -1103,6 +1290,7 @@ function stageGateResult(
     canAutoRepair: false,
     canManualRetry: false,
     needsClarification: false,
+    clarificationPrompt: null,
     ...result,
   };
 }
@@ -1242,6 +1430,9 @@ export function evaluateWorkflowStageGate(
               run.dispatchReason === "auto_repair",
           ) && failedRun.dispatchReason !== "auto_repair"
         : false;
+    const clarificationPrompt = failedRun
+      ? extractClarificationPromptFromArtifact(failedRun.artifact)
+      : null;
     return stageGateResult({
       status: "blocked",
       label: "Blocked",
@@ -1261,6 +1452,7 @@ export function evaluateWorkflowStageGate(
       canAutoRepair,
       canManualRetry: Boolean(failedRun),
       needsClarification: Boolean(failedRun && !isHandoffSchemaRun(failedRun)),
+      clarificationPrompt,
     });
   }
 
@@ -1356,10 +1548,10 @@ const WORKER_INTERPRETATION_OUTPUT_TEMPLATE = [
   '  "taskLevel": "Level 0 | Level 1 | Level 2 | Level 3",',
   '  "summary": "classification summary; do not claim sources are confirmed",',
   '  "suggestedNextAgent": "agent1",',
-  '  "missingSources": ["Spec / business rule confirmation"],',
-  '  "sourceWarnings": ["User text is intake evidence only"],',
+  '  "missingSources": ["only list true external-source gaps, such as API contract or permission mapping"],',
+  '  "sourceWarnings": ["User text, screenshots, and repo inspection may be sufficient for low-risk scoped fixes"],',
   '  "riskFlags": [],',
-  '  "guardrails": ["Do not invent requirements, API fields, UI behavior, QA criteria, or implementation scope."]',
+  '  "guardrails": ["Do not invent API fields, permissions, data models, business rules, or expanded workflows."]',
   "}",
   "CONTROL_PLANE_INTERPRETATION_END",
   "```",
