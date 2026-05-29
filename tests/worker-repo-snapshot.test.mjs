@@ -161,7 +161,7 @@ test("no-PR workflow auto-dispatches through Agent3 and then delivers", async ()
     status: "completed",
     commandOutput: "ok",
     diffSummary: "clean",
-    artifact: "# Agent3",
+    artifact: sampleCompletedArtifact("agent3"),
   });
 
   const delivered = getRequestDetail(request.requestId);
@@ -170,6 +170,173 @@ test("no-PR workflow auto-dispatches through Agent3 and then delivers", async ()
     delivered.runs.filter((run) => run.status === "queued").length,
     0,
   );
+});
+
+test("Agent3 block review keeps request blocked instead of PR ready", async () => {
+  const {
+    completeWorkerRun,
+    createRequest,
+    dispatchNextAgent,
+    getRequestDetail,
+    registerWorker,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+
+  const worker = registerWorker({
+    workerId: `worker-agent3-block-${randomUUID()}`,
+    displayName: "Agent3 Block Worker",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = "C:\\workspace\\repo-agent3-block";
+
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "repo-agent3-block", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+
+  const request = createRequest({
+    detail: "Add MJ to topbar.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+  });
+  const agent0 = dispatchNextAgent({ requestId: request.requestId });
+  completeAndAssertNext({
+    completeWorkerRun,
+    getRequestDetail,
+    requestId: request.requestId,
+    worker,
+    runId: agent0.runId,
+    completedAgent: "agent0",
+    nextAgent: "agent1",
+  });
+  const agent1 = getRun(getRequestDetail(request.requestId), "agent1");
+  completeAndAssertNext({
+    completeWorkerRun,
+    getRequestDetail,
+    requestId: request.requestId,
+    worker,
+    runId: agent1.runId,
+    completedAgent: "agent1",
+    nextAgent: "agent2",
+  });
+  const agent2 = getRun(getRequestDetail(request.requestId), "agent2");
+  completeAndAssertNext({
+    completeWorkerRun,
+    getRequestDetail,
+    requestId: request.requestId,
+    worker,
+    runId: agent2.runId,
+    completedAgent: "agent2",
+    nextAgent: "agent3",
+  });
+  const agent3 = getRun(getRequestDetail(request.requestId), "agent3");
+
+  completeWorkerRun(worker.workerId, worker.token, agent3.runId, {
+    status: "completed",
+    commandOutput: "ok",
+    diffSummary: "dirty branch",
+    artifact: sampleAgent3BlockedArtifact(),
+  });
+
+  const blocked = getRequestDetail(request.requestId);
+  const blockedRun = getRun(blocked, "agent3");
+  assert.equal(blockedRun.status, "blocked");
+  assert.equal(blocked.request.status, "blocked");
+  assert.match(blockedRun.error, /delivery review blocked PR readiness/i);
+});
+
+test("Agent3 uses Agent2 execution repo path when worker reports a request worktree", async () => {
+  const {
+    completeWorkerRun,
+    createRequest,
+    dispatchNextAgent,
+    getRequestDetail,
+    heartbeatWorkerRun,
+    registerWorker,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+
+  const worker = registerWorker({
+    workerId: `worker-worktree-path-${randomUUID()}`,
+    displayName: "Worktree Path Worker",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = "C:\\workspace\\repo-worktree-source";
+  const worktreePath = "C:\\workspace\\.codex-request-worktrees\\REQ-test";
+
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "repo-worktree-source", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+
+  const request = createRequest({
+    detail: "Add UI copy.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+  });
+  const agent0 = dispatchNextAgent({ requestId: request.requestId });
+  completeAndAssertNext({
+    completeWorkerRun,
+    getRequestDetail,
+    requestId: request.requestId,
+    worker,
+    runId: agent0.runId,
+    completedAgent: "agent0",
+    nextAgent: "agent1",
+  });
+  const agent1 = getRun(getRequestDetail(request.requestId), "agent1");
+  completeAndAssertNext({
+    completeWorkerRun,
+    getRequestDetail,
+    requestId: request.requestId,
+    worker,
+    runId: agent1.runId,
+    completedAgent: "agent1",
+    nextAgent: "agent2",
+  });
+  const agent2 = getRun(getRequestDetail(request.requestId), "agent2");
+
+  heartbeatWorkerRun(worker.workerId, worker.token, agent2.runId, {
+    progressLabel: "Preparing request worktree",
+    executionRepoPath: worktreePath,
+  });
+  completeAndAssertNext({
+    completeWorkerRun,
+    getRequestDetail,
+    requestId: request.requestId,
+    worker,
+    runId: agent2.runId,
+    completedAgent: "agent2",
+    nextAgent: "agent3",
+  });
+
+  const agent3 = getRun(getRequestDetail(request.requestId), "agent3");
+  assert.equal(agent3.repoPath, worktreePath);
+  assert.match(agent3.packet, new RegExp(escapeRegExp(worktreePath)));
 });
 
 test("incomplete Agent1 handoff auto-repairs once and recovery reruns same Agent", async () => {
@@ -1066,7 +1233,55 @@ function sampleCompletedArtifact(agentRole) {
     ].join("\n");
   }
 
+  if (agentRole === "agent3") {
+    return [
+      "# Delivery Report",
+      "",
+      "## Review Result",
+      "- pass: implementation evidence is acceptable.",
+      "",
+      "## Scope Compliance",
+      "- Agent2 stayed within Agent1 allowed files.",
+      "",
+      "## Unapproved Changes",
+      "- none.",
+      "",
+      "## Verification Result",
+      "- Commands reviewed and passing.",
+      "",
+      "## Regression Risk",
+      "- low.",
+      "",
+      "## Human Decisions",
+      "- none.",
+    ].join("\n");
+  }
+
   return `# ${agentRole}`;
+}
+
+function sampleAgent3BlockedArtifact() {
+  return [
+    "# Delivery Report",
+    "",
+    "## Review Result",
+    "- block: current branch includes unrelated committed changes.",
+    "",
+    "## Scope Compliance",
+    "- Agent2 diff is scoped, but PR branch is not clean.",
+    "",
+    "## Unapproved Changes",
+    "- Current branch contains unrelated prior feature commits.",
+    "",
+    "## Verification Result",
+    "- Agent2 commands reviewed.",
+    "",
+    "## Regression Risk",
+    "- Delivery risk is high until branch is isolated.",
+    "",
+    "## Human Decisions",
+    "- Create a clean request-scoped branch before PR.",
+  ].join("\n");
 }
 
 function sampleBlockedSourceCheckArtifact() {
@@ -1170,6 +1385,10 @@ function getRun(detail, agentRole) {
   const run = detail.runs.find((candidate) => candidate.agentRole === agentRole);
   assert(run, `${agentRole} run was not found`);
   return run;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function getRuns(detail, agentRole) {

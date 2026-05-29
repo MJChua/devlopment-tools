@@ -12,6 +12,7 @@ process.env.CONTROL_PLANE_DB_PATH = path.join(tempDir, "realtime.sqlite");
 const {
   createRequest,
   dispatchNextAgent,
+  getRequestDetail,
   getRealtimeDigest,
   heartbeatWorkerRun,
   pollWorker,
@@ -95,6 +96,52 @@ test("run heartbeat timestamps do not change realtime digest", () => {
   const after = getRealtimeDigest(new Date("2026-05-27T00:00:05.000Z"));
 
   assert.equal(after.digest, before.digest);
+});
+
+test("run progress heartbeat changes realtime digest and stores progress", () => {
+  const worker = registerWorker({
+    workerId: "realtime-run-progress-worker",
+    displayName: "Realtime Run Progress Worker",
+    repoPath: "C:\\workspace\\realtime-progress",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = "C:\\workspace\\realtime-progress";
+
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "realtime-progress", path: repoPath, source: "test" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+  const request = createRequest({
+    detail: "Verify progress digest updates.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+  });
+  const run = dispatchNextAgent({ requestId: request.requestId });
+  const before = getRealtimeDigest(new Date("2026-05-27T00:00:06.000Z"));
+
+  heartbeatWorkerRun(worker.workerId, worker.token, run.runId, {
+    progressLabel: "Running tests",
+    progressDetail: "pnpm test",
+    progressUpdatedAt: "2026-05-27T00:00:07.000Z",
+  });
+  const after = getRealtimeDigest(new Date("2026-05-27T00:00:08.000Z"));
+  const detail = getRequestDetail(request.requestId);
+  const updatedRun = detail.runs.find((candidate) => candidate.runId === run.runId);
+
+  assert.notEqual(after.digest, before.digest);
+  assert.equal(updatedRun.progressLabel, "Running tests");
+  assert.equal(updatedRun.progressDetail, "pnpm test");
 });
 
 test("realtime reconnect helpers use capped backoff and fallback threshold", () => {

@@ -41,6 +41,7 @@ import {
   type RequestInterpretation,
 } from "./request-analysis.ts";
 import { normalizeRequestInputTemplateId } from "./request-templates.ts";
+import { scanRepoCandidatesForAgent1 } from "./repo-candidate-scan.ts";
 
 const DATA_DIR = path.join(process.cwd(), ".control-plane");
 const DB_PATH =
@@ -59,6 +60,13 @@ export type CompleteWorkerRunInput = {
   artifact?: string;
   error?: string;
   interpretation?: Partial<RequestInterpretation>;
+};
+
+export type WorkerRunHeartbeatInput = {
+  progressLabel?: unknown;
+  progressDetail?: unknown;
+  progressUpdatedAt?: unknown;
+  executionRepoPath?: unknown;
 };
 
 export type RecoverWorkflowRequestInput = {
@@ -373,6 +381,9 @@ export function getRealtimeDigest(now = new Date()): RealtimeDigest {
               status,
               retry_of_run_id,
               dispatch_reason,
+              progress_label,
+              progress_detail,
+              progress_updated_at,
               started_at,
               completed_at,
               updated_at
@@ -667,12 +678,23 @@ export function dispatchNextAgent(input: {
   const runId = randomUUID();
   const now = new Date().toISOString();
   const requestSnapshot = { ...request, repoPath };
+  const repoPathForRun = resolveRunRepoPath({
+    agentRole,
+    requestRepoPath: repoPath,
+    runs: detail.runs,
+  });
   const packet = appendRecoveryContextToPacket(
     buildWorkflowAgentPacket(
-      requestSnapshot,
+      { ...requestSnapshot, repoPath: repoPathForRun },
       agentRole,
       detail.runs,
       detail.attachments,
+      {
+        repoCandidateScan:
+          agentRole === "agent1"
+            ? scanRepoCandidatesForAgent1({ ...requestSnapshot, repoPath })
+            : null,
+      },
     ),
     {
       dispatchReason,
@@ -711,7 +733,7 @@ export function dispatchNextAgent(input: {
       request.requestId,
       agentRole,
       worker.workerId,
-      repoPath,
+      repoPathForRun,
       retryOfRunId,
       dispatchReason,
       packet,
@@ -1062,6 +1084,21 @@ function ensureRequestRepoPathSnapshot(
   return repoPath;
 }
 
+function resolveRunRepoPath(input: {
+  agentRole: AgentRole;
+  requestRepoPath: string;
+  runs: WorkerRun[];
+}) {
+  if (input.agentRole !== "agent3") {
+    return input.requestRepoPath;
+  }
+
+  const latestAgent2 = [...input.runs]
+    .reverse()
+    .find((run) => run.agentRole === "agent2" && run.status === "completed");
+  return latestAgent2?.repoPath.trim() || input.requestRepoPath;
+}
+
 export function pollWorker(workerId: string, token: string) {
   validateWorkerToken(workerId, token);
   const db = getDatabase();
@@ -1096,9 +1133,21 @@ export function pollWorker(workerId: string, token: string) {
   const now = new Date().toISOString();
   db.prepare(
     `UPDATE worker_runs
-     SET status = 'running', started_at = ?, updated_at = ?
+     SET status = 'running',
+         started_at = ?,
+         updated_at = ?,
+         progress_label = ?,
+         progress_detail = ?,
+         progress_updated_at = ?
      WHERE run_id = ?`,
-  ).run(now, now, row.run_id);
+  ).run(
+    now,
+    now,
+    "Worker accepted run",
+    "Local Worker picked up the queued Agent run.",
+    now,
+    row.run_id,
+  );
 
   return {
     run: requireRun(String(row.run_id)),
@@ -1191,6 +1240,7 @@ export function heartbeatWorkerRun(
   workerId: string,
   token: string,
   runId: string,
+  input: WorkerRunHeartbeatInput = {},
 ) {
   validateWorkerToken(workerId, token);
   const run = requireRun(runId);
@@ -1199,9 +1249,39 @@ export function heartbeatWorkerRun(
   }
 
   const now = new Date().toISOString();
+  const progressLabel = normalizeProgressText(input.progressLabel, 100);
+  const progressDetail = normalizeProgressText(input.progressDetail, 500);
+  const progressUpdatedAt = normalizeOptionalIsoTime(input.progressUpdatedAt) || now;
+  const executionRepoPath = normalizeProgressText(input.executionRepoPath, 1000);
   getDatabase()
-    .prepare(`UPDATE worker_runs SET updated_at = ? WHERE run_id = ?`)
-    .run(now, runId);
+    .prepare(
+      progressLabel || progressDetail || executionRepoPath
+        ? `UPDATE worker_runs
+           SET updated_at = ?,
+               progress_label = CASE WHEN ? != '' THEN ? ELSE progress_label END,
+               progress_detail = CASE WHEN ? != '' THEN ? ELSE progress_detail END,
+               progress_updated_at = CASE WHEN ? != '' OR ? != '' THEN ? ELSE progress_updated_at END,
+               repo_path = CASE WHEN ? != '' THEN ? ELSE repo_path END
+           WHERE run_id = ?`
+        : `UPDATE worker_runs SET updated_at = ? WHERE run_id = ?`,
+    )
+    .run(
+      ...(progressLabel || progressDetail || executionRepoPath
+        ? [
+            now,
+            progressLabel,
+            progressLabel,
+            progressDetail,
+            progressDetail,
+            progressLabel,
+            progressDetail,
+            progressUpdatedAt,
+            executionRepoPath,
+            executionRepoPath,
+            runId,
+          ]
+        : [now, runId]),
+    );
   markWorkerSeen(workerId);
 
   return requireRun(runId);
@@ -1278,6 +1358,9 @@ export function completeWorkerRun(
            diff_summary = ?,
            artifact = ?,
            error = ?,
+           progress_label = ?,
+           progress_detail = ?,
+           progress_updated_at = ?,
            completed_at = ?,
            updated_at = ?
        WHERE run_id = ?`,
@@ -1288,6 +1371,9 @@ export function completeWorkerRun(
       input.diffSummary?.trim() ?? run.diffSummary,
       artifact,
       error,
+      status === "completed" ? "Agent completed" : "Agent blocked",
+      error || `${run.agentRole} returned ${status}.`,
+      now,
       now,
       now,
       runId,
@@ -1722,6 +1808,9 @@ function getDatabase() {
       diff_summary TEXT NOT NULL,
       artifact TEXT NOT NULL,
       error TEXT NOT NULL,
+      progress_label TEXT NOT NULL DEFAULT '',
+      progress_detail TEXT NOT NULL DEFAULT '',
+      progress_updated_at TEXT,
       created_at TEXT NOT NULL,
       started_at TEXT,
       completed_at TEXT,
@@ -1869,6 +1958,9 @@ function getDatabase() {
   ensureColumn(database, "workers", "codex_setup_requested_at", "TEXT");
   ensureColumn(database, "worker_runs", "repo_path", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, "worker_runs", "retry_of_run_id", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(database, "worker_runs", "progress_label", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(database, "worker_runs", "progress_detail", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(database, "worker_runs", "progress_updated_at", "TEXT");
   ensureColumn(
     database,
     "worker_runs",
@@ -2122,6 +2214,23 @@ function uniqueRepositoryCandidates(
   return result.sort((left, right) => left.name.localeCompare(right.name));
 }
 
+function normalizeProgressText(value: unknown, maxChars: number) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  return value.replace(/\s+/g, " ").trim().slice(0, maxChars).trim();
+}
+
+function normalizeOptionalIsoTime(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) {
+    return "";
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : "";
+}
+
 function mapRunRow(row: unknown): WorkerRun {
   const value = row as Record<string, string | null>;
 
@@ -2139,6 +2248,11 @@ function mapRunRow(row: unknown): WorkerRun {
     diffSummary: String(value.diff_summary ?? ""),
     artifact: String(value.artifact ?? ""),
     error: String(value.error ?? ""),
+    progressLabel: String(value.progress_label ?? ""),
+    progressDetail: String(value.progress_detail ?? ""),
+    progressUpdatedAt: value.progress_updated_at
+      ? String(value.progress_updated_at)
+      : null,
     createdAt: String(value.created_at),
     startedAt: value.started_at ? String(value.started_at) : null,
     completedAt: value.completed_at ? String(value.completed_at) : null,

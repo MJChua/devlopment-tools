@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
@@ -74,7 +74,7 @@ async function main() {
 }
 
 async function executeRun(run) {
-  const runRepoPath = run.repoPath || defaultRepoPath;
+  let runRepoPath = run.repoPath || defaultRepoPath;
   console.log(
     `[worker:${workerId}] running ${run.agentRole} for ${run.requestId} in ${runRepoPath || "(no repo selected)"}`,
   );
@@ -82,6 +82,23 @@ async function executeRun(run) {
   const tempDir = await mkdtemp(path.join(tmpdir(), "control-plane-worker-"));
   const packetFile = path.join(tempDir, `${run.requestId}-${run.agentRole}.md`);
   let runHeartbeatTimer = null;
+  const progress = {
+    label: "Preparing Agent run",
+    detail: `${run.agentRole} is preparing the packet.`,
+    updatedAt: new Date().toISOString(),
+    executionRepoPath: runRepoPath,
+  };
+  const heartbeatBody = () => ({
+    progressLabel: progress.label,
+    progressDetail: progress.detail,
+    progressUpdatedAt: progress.updatedAt,
+    executionRepoPath: progress.executionRepoPath,
+  });
+  const setProgress = (label, detail = "") => {
+    progress.label = label;
+    progress.detail = detail || label;
+    progress.updatedAt = new Date().toISOString();
+  };
 
   try {
     if (!runRepoPath) {
@@ -89,15 +106,16 @@ async function executeRun(run) {
     }
 
     await writeFile(packetFile, run.packet, "utf8");
-    await postJson(`/api/workers/runs/${run.runId}/heartbeat`, {});
+    await postJson(`/api/workers/runs/${run.runId}/heartbeat`, heartbeatBody());
     runHeartbeatTimer = setInterval(() => {
-      void postJson(`/api/workers/runs/${run.runId}/heartbeat`, {}).catch(
-        (error) => {
-          console.warn(
-            `[worker:${workerId}] run heartbeat failed for ${run.runId}: ${formatError(error)}`,
-          );
-        },
-      );
+      void postJson(
+        `/api/workers/runs/${run.runId}/heartbeat`,
+        heartbeatBody(),
+      ).catch((error) => {
+        console.warn(
+          `[worker:${workerId}] run heartbeat failed for ${run.runId}: ${formatError(error)}`,
+        );
+      });
     }, 30000);
 
     if (!commandTemplate.trim()) {
@@ -106,15 +124,37 @@ async function executeRun(run) {
       );
     }
 
+    const preparedRepo = await prepareExecutionRepository(run, runRepoPath, {
+      setProgress,
+    });
+    runRepoPath = preparedRepo.repoPath;
+    progress.executionRepoPath = runRepoPath;
+    await postJson(`/api/workers/runs/${run.runId}/heartbeat`, heartbeatBody());
+
     const command = renderCommand(commandTemplate, {
       packetFile,
       requestId: run.requestId,
       agentRole: run.agentRole,
       repoPath: runRepoPath,
     });
-    const result = await runCommand(command, runRepoPath, {
-      AGENT_PACKET_FILE: packetFile,
-    });
+    setProgress("Running Codex", `${run.agentRole} is executing in ${runRepoPath}.`);
+    await postJson(`/api/workers/runs/${run.runId}/heartbeat`, heartbeatBody());
+    const result = await runCommand(
+      command,
+      runRepoPath,
+      {
+        AGENT_PACKET_FILE: packetFile,
+      },
+      0,
+      (chunkText) => {
+        const inferred = inferCommandProgress(chunkText);
+        if (inferred) {
+          setProgress(inferred.label, inferred.detail);
+        }
+      },
+    );
+    setProgress("Collecting diff summary", "Codex finished; collecting git diff.");
+    await postJson(`/api/workers/runs/${run.runId}/heartbeat`, heartbeatBody());
     const diffSummary = await collectDiffSummary(runRepoPath);
     const artifact = buildArtifact(run, result, diffSummary);
 
@@ -422,7 +462,145 @@ function renderCommand(template, values) {
     .replaceAll("{repoPath}", quote(values.repoPath));
 }
 
-function runCommand(command, cwd, extraEnv = {}, timeoutMs = 0) {
+async function prepareExecutionRepository(run, repoPath, progress) {
+  if (run.agentRole !== "agent2" || !isDraftPrRun(run)) {
+    return { repoPath };
+  }
+
+  progress.setProgress(
+    "Preparing request worktree",
+    "Creating or reusing an isolated request-scoped worktree before Agent2.",
+  );
+
+  const gitCheck = await runCommand("git rev-parse --show-toplevel", repoPath, {}, 15000);
+  if (gitCheck.exitCode !== 0) {
+    throw new Error(
+      `Cannot prepare request-scoped worktree because the selected repo is not a Git repository: ${gitCheck.output.trim()}`,
+    );
+  }
+
+  const baseRef = await resolveWorktreeBaseRef(repoPath);
+  const branchName = `codex/${sanitizeBranchSegment(run.requestId)}`;
+  const worktreeRoot = path.join(path.dirname(repoPath), ".codex-request-worktrees");
+  const worktreePath = path.join(worktreeRoot, sanitizePathSegment(run.requestId));
+  await mkdir(worktreeRoot, { recursive: true });
+
+  const existingWorktree = await findExistingWorktree(repoPath, worktreePath);
+  if (existingWorktree) {
+    return { repoPath: existingWorktree };
+  }
+
+  const branchExists = await gitRefExists(repoPath, `refs/heads/${branchName}`);
+  const addCommand = branchExists
+    ? `git worktree add ${quote(worktreePath)} ${quote(branchName)}`
+    : `git worktree add -b ${quote(branchName)} ${quote(worktreePath)} ${quote(baseRef)}`;
+  const addResult = await runCommand(addCommand, repoPath, {}, 120000);
+  if (addResult.exitCode !== 0) {
+    throw new Error(
+      `Cannot prepare request-scoped worktree for ${run.requestId}: ${addResult.output.trim()}`,
+    );
+  }
+
+  return { repoPath: worktreePath };
+}
+
+async function resolveWorktreeBaseRef(repoPath) {
+  for (const ref of ["origin/develop", "develop", "origin/main", "main", "HEAD"]) {
+    const result = await runCommand(`git rev-parse --verify ${quote(ref)}`, repoPath, {}, 15000);
+    if (result.exitCode === 0) {
+      return ref;
+    }
+  }
+
+  return "HEAD";
+}
+
+async function gitRefExists(repoPath, ref) {
+  const result = await runCommand(
+    `git show-ref --verify --quiet ${quote(ref)}`,
+    repoPath,
+    {},
+    15000,
+  );
+  return result.exitCode === 0;
+}
+
+async function findExistingWorktree(repoPath, worktreePath) {
+  const result = await runCommand("git worktree list --porcelain", repoPath, {}, 15000);
+  if (result.exitCode !== 0) {
+    return "";
+  }
+
+  const normalizedTarget = path.resolve(worktreePath).toLowerCase();
+  const existing = parseCommandOutputLines(result.output)
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length).trim())
+    .find((candidate) => path.resolve(candidate).toLowerCase() === normalizedTarget);
+  return existing || "";
+}
+
+function isDraftPrRun(run) {
+  return /Delivery Mode:\s*Draft PR required/i.test(run.packet || "");
+}
+
+function sanitizeBranchSegment(value) {
+  return String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9._/-]+/g, "-")
+    .replace(/\/+/g, "/")
+    .replace(/^[-/]+|[-/]+$/g, "")
+    .slice(0, 80);
+}
+
+function sanitizePathSegment(value) {
+  return String(value)
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 100);
+}
+
+function inferCommandProgress(chunkText) {
+  const text = chunkText.trim();
+  if (!text) {
+    return null;
+  }
+
+  const shellCommand = text.match(/-Command ['"]([^'"]+)['"]/);
+  if (shellCommand?.[1]) {
+    return {
+      label: "Running shell command",
+      detail: shellCommand[1],
+    };
+  }
+
+  const pnpmScript = text.match(/>\s+(pnpm\s+[^\r\n]+)/i);
+  if (pnpmScript?.[1]) {
+    return {
+      label: "Running pnpm command",
+      detail: pnpmScript[1],
+    };
+  }
+
+  if (/pnpm verify:/i.test(text)) {
+    return { label: "Running full verification", detail: clipProgressText(text) };
+  }
+
+  if (/pnpm .*test/i.test(text)) {
+    return { label: "Running tests", detail: clipProgressText(text) };
+  }
+
+  if (/git diff|git status/i.test(text)) {
+    return { label: "Checking git diff", detail: clipProgressText(text) };
+  }
+
+  return null;
+}
+
+function clipProgressText(value) {
+  return value.replace(/\s+/g, " ").trim().slice(0, 240);
+}
+
+function runCommand(command, cwd, extraEnv = {}, timeoutMs = 0, onOutput = null) {
   return new Promise((resolve) => {
     const child = spawn(command, {
       cwd,
@@ -455,12 +633,16 @@ function runCommand(command, cwd, extraEnv = {}, timeoutMs = 0) {
     child.stdout.on("data", (chunk) => {
       const buffer = Buffer.from(chunk);
       chunks.push(buffer);
-      process.stdout.write(decodeCommandBuffer(buffer));
+      const decoded = decodeCommandBuffer(buffer);
+      onOutput?.(decoded);
+      process.stdout.write(decoded);
     });
     child.stderr.on("data", (chunk) => {
       const buffer = Buffer.from(chunk);
       chunks.push(buffer);
-      process.stderr.write(decodeCommandBuffer(buffer));
+      const decoded = decodeCommandBuffer(buffer);
+      onOutput?.(decoded);
+      process.stderr.write(decoded);
     });
     child.on("close", (exitCode) => {
       if (settled) {

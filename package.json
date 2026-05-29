@@ -8,7 +8,7 @@
     "start": "node scripts/run-with-realtime.mjs start",
     "lint": "eslint",
     "smoke": "node scripts/smoke-control-plane.mjs",
-    "test": "node --no-warnings --test tests/request-intake.test.mjs tests/request-analysis.test.mjs tests/request-templates.test.mjs tests/control-plane-regression.test.mjs tests/workflow.test.mjs tests/runtime-config.test.mjs tests/worker-bootstrap.test.mjs tests/local-worker-utils.test.mjs tests/local-launcher-utils.test.mjs tests/worker-repo-snapshot.test.mjs tests/realtime.test.mjs"
+    "test": "node --no-warnings --test tests/request-intake.test.mjs tests/request-analysis.test.mjs tests/request-templates.test.mjs tests/control-plane-regression.test.mjs tests/workflow.test.mjs tests/runtime-config.test.mjs tests/worker-bootstrap.test.mjs tests/local-worker-utils.test.mjs tests/local-launcher-utils.test.mjs tests/worker-repo-snapshot.test.mjs tests/realtime.test.mjs tests/repo-candidate-scan.test.mjs"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

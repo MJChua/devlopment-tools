@@ -71,6 +71,7 @@ import {
   type BlockerSummary,
 } from "@/lib/blocker-summary";
 import {
+  RUN_SOFT_TIMEOUT_MS,
   getNextAgentRole,
   type AzureReferenceEvidence,
   type ClarificationPrompt,
@@ -4637,6 +4638,9 @@ function WorkflowStatusDashboard({
   const statusText = openRun
     ? `${formatUiAgentRole(openRun.agentRole)} / ${formatWorkerRunStatus(openRun.status)}`
     : formatUiWorkflowStage(request.status);
+  const progressLabel = openRun?.progressLabel?.trim() ?? "";
+  const progressDetail = openRun?.progressDetail?.trim() ?? "";
+  const isPastSoftTimeout = openRun ? isRunPastSoftTimeout(openRun) : false;
 
   return (
     <div
@@ -4675,6 +4679,26 @@ function WorkflowStatusDashboard({
           value={formatTimestamp(activeRun?.updatedAt ?? request.updatedAt)}
         />
       </div>
+      {isRunning ? (
+        <div className="mt-3 rounded-md border border-blue-200 bg-white/75 p-3 text-sm leading-6 text-slate-700">
+          <div className="font-semibold text-slate-950">
+            {progressLabel || "正在執行 Agent"}
+          </div>
+          <p className="mt-1 break-words">
+            {progressDetail || "Worker 已接手，等待下一次進度回報。"}
+          </p>
+          {openRun?.progressUpdatedAt ? (
+            <p className="mt-1 text-xs text-slate-500">
+              進度更新：{formatTimestamp(openRun.progressUpdatedAt)}
+            </p>
+          ) : null}
+          {isPastSoftTimeout ? (
+            <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-900">
+              已超過建議時間，可能正在跑完整驗證或等待 Codex 回應；可先查看技術 Log 或重新同步狀態。
+            </p>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -5548,6 +5572,15 @@ function formatRunDuration(run: WorkerRunView) {
   }
 
   return `${minutes}m ${remainder}s`;
+}
+
+function isRunPastSoftTimeout(run: WorkerRunView) {
+  if (!run.startedAt || run.completedAt) {
+    return false;
+  }
+
+  const start = Date.parse(run.startedAt);
+  return !Number.isNaN(start) && Date.now() - start > RUN_SOFT_TIMEOUT_MS;
 }
 
 function formatTimestamp(value?: string | null) {

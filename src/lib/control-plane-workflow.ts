@@ -97,6 +97,20 @@ export type ClarificationPrompt = {
   summary: string;
   questions: ClarificationPromptQuestion[];
 };
+export type RepoCandidateScanEntry = {
+  label: string;
+  path: string;
+  reason: string;
+};
+export type RepoCandidateScan = {
+  rootPath: string;
+  apps: RepoCandidateScanEntry[];
+  surfaces: RepoCandidateScanEntry[];
+  warnings: string[];
+};
+export type WorkflowAgentPacketContext = {
+  repoCandidateScan?: RepoCandidateScan | null;
+};
 
 export type WorkflowRequestInput = {
   kind?: RequestKind;
@@ -199,6 +213,9 @@ export type WorkerRun = {
   diffSummary: string;
   artifact: string;
   error: string;
+  progressLabel: string;
+  progressDetail: string;
+  progressUpdatedAt: string | null;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -261,6 +278,7 @@ export type StageGateResult = {
 };
 
 export const RUN_HEARTBEAT_STALE_MS = 10 * 60 * 1000;
+export const RUN_SOFT_TIMEOUT_MS = 5 * 60 * 1000;
 
 const HANDOFF_SECTION_MAX_CHARS = 900;
 const HANDOFF_FALLBACK_MAX_CHARS = 1200;
@@ -282,6 +300,9 @@ const HANDOFF_SECTION_HEADINGS = [
   "Commands Run",
   "Verification Result",
   "Scope Compliance",
+  "Review Result",
+  "Unapproved Changes",
+  "Regression Risk",
   "Human Decisions",
   "Blockers",
 ] as const;
@@ -300,6 +321,14 @@ const REQUIRED_HANDOFF_FIELDS: Partial<Record<AgentRole, string[]>> = {
     "Commands Run",
     "Verification Result",
     "Scope Compliance",
+    "Human Decisions",
+  ],
+  agent3: [
+    "Review Result",
+    "Scope Compliance",
+    "Unapproved Changes",
+    "Verification Result",
+    "Regression Risk",
     "Human Decisions",
   ],
 };
@@ -463,6 +492,7 @@ export function buildWorkflowAgentPacket(
   agentRole: AgentRole,
   runs: WorkerRun[] = [],
   attachments: RequestAttachment[] = [],
+  context: WorkflowAgentPacketContext = {},
 ) {
   const sections = [
     `# ${formatAgentRole(agentRole)} Packet`,
@@ -480,7 +510,7 @@ export function buildWorkflowAgentPacket(
     "If information is missing, conflicting, or out of scope, stop and report it.",
     "```",
     "",
-    ...buildPacketBody(request, agentRole, runs, attachments),
+    ...buildPacketBody(request, agentRole, runs, attachments, context),
   ];
 
   return sections.join("\n");
@@ -496,6 +526,7 @@ function buildPacketHeader(request: WorkflowRequest, agentRole: AgentRole) {
     `Evidence Mode: ${formatEvidenceMode(request.evidenceMode)}`,
     `Input Template: ${request.templateId}`,
     `Azure Reference: ${formatWorkflowAzureReference(request)}`,
+    `Execution Repo: ${request.repoPath || "(not selected)"}`,
   ];
 
   if (agentRole === "agent0" || agentRole === "agent1") {
@@ -515,13 +546,14 @@ function buildPacketBody(
   agentRole: AgentRole,
   runs: WorkerRun[],
   attachments: RequestAttachment[],
+  context: WorkflowAgentPacketContext,
 ) {
   if (agentRole === "agent0") {
     return buildAgent0PacketBody(request, attachments);
   }
 
   if (agentRole === "agent1") {
-    return buildAgent1PacketBody(request, runs, attachments);
+    return buildAgent1PacketBody(request, runs, attachments, context);
   }
 
   if (agentRole === "agent2") {
@@ -566,6 +598,7 @@ function buildAgent1PacketBody(
   request: WorkflowRequest,
   runs: WorkerRun[],
   attachments: RequestAttachment[],
+  context: WorkflowAgentPacketContext,
 ) {
   return [
     ...buildPriorArtifactsSection(runs, ["agent0"]),
@@ -587,6 +620,8 @@ function buildAgent1PacketBody(
     "## Intake Warnings",
     "",
     ...formatListOrNone(request.interpretation.sourceWarnings),
+    "",
+    ...buildRepoCandidateScanSection(context.repoCandidateScan),
     "",
     "## Output",
     "",
@@ -760,6 +795,43 @@ function buildVisualEvidenceModeSection(request: WorkflowRequest) {
   ];
 }
 
+function buildRepoCandidateScanSection(scan: RepoCandidateScan | null | undefined) {
+  if (!scan) {
+    return [
+      "## Pre-Scanned Repo Candidates",
+      "",
+      "- Not available. Agent1 must inspect the selected repository before blocking on target ambiguity.",
+    ];
+  }
+
+  return [
+    "## Pre-Scanned Repo Candidates",
+    "",
+    "- These candidates were produced by deterministic repo scanning before Agent1 started.",
+    "- Treat them as navigation hints only; they are not confirmed requirements and do not replace source/scope checks.",
+    `- Repo root: ${scan.rootPath}`,
+    "",
+    "### App Candidates",
+    ...formatRepoCandidateEntries(scan.apps),
+    "",
+    "### Header / Topbar / Route Candidates",
+    ...formatRepoCandidateEntries(scan.surfaces),
+    ...(scan.warnings.length > 0
+      ? ["", "### Scan Warnings", ...formatListOrNone(scan.warnings)]
+      : []),
+  ];
+}
+
+function formatRepoCandidateEntries(entries: RepoCandidateScanEntry[]) {
+  if (entries.length === 0) {
+    return ["- none"];
+  }
+
+  return entries.map(
+    (entry) => `- ${entry.label}: ${entry.path} (${entry.reason})`,
+  );
+}
+
 function buildAgent2PacketBody(
   request: WorkflowRequest,
   runs: WorkerRun[],
@@ -800,6 +872,10 @@ function buildAgent2PacketBody(
     "## Delivery Mode",
     "",
     formatDeliveryModeGuidance(request.deliveryMode),
+    "",
+    "## Verification Strategy",
+    "",
+    ...buildAgent2VerificationStrategy(request),
     "",
     "## Rules",
     "",
@@ -853,6 +929,10 @@ function buildAgent3PacketBody(
     "",
     formatDeliveryModeGuidance(request.deliveryMode),
     "",
+    "## Review Strategy",
+    "",
+    ...buildAgent3ReviewStrategy(request),
+    "",
     "## Rules",
     "",
     "- Review against confirmed sources, scope, implementation result, diff, and verification evidence.",
@@ -860,6 +940,43 @@ function buildAgent3PacketBody(
     "- Do not justify out-of-scope changes or mark provisional checks as QA-confirmed.",
     "- Merge PR, abandon PR, branch policy, build trigger, deploy, and Work Item field mutation are out of MVP scope.",
   ];
+}
+
+function buildAgent2VerificationStrategy(request: WorkflowRequest) {
+  if (isLowRiskLevelOneRequest(request)) {
+    return [
+      "- This is a Level 1 request with no risk flags. For low-risk UI/copy/localized visual changes, prefer scoped verification over full app verification.",
+      "- Run the most specific changed-file or component test available, plus formatting checks for touched hand-written files.",
+      "- Run i18n parity checks only when locale files change.",
+      "- Do not run broad `pnpm verify:*` by default for app-local UI/copy changes.",
+      "- Escalate to the relevant full `pnpm verify:*` only if the diff touches shared packages, package/env/config files, API clients/contracts, permission/auth/data/business-rule code, generated outputs, or cross-page workflow behavior.",
+    ];
+  }
+
+  return [
+    "- Use the verification commands required by Agent1's Task Package and the repo rules.",
+    "- For API, permissions, data model, shared packages, env/config, package manifests, generated files, or high-risk workflow changes, run the relevant full `pnpm verify:*` gate before handoff.",
+  ];
+}
+
+function buildAgent3ReviewStrategy(request: WorkflowRequest) {
+  if (isLowRiskLevelOneRequest(request)) {
+    return [
+      "- Prefer trusting Agent2's `Commands Run` and `Verification Result` when they are present, passing, and match the changed files.",
+      "- Do not rerun full `pnpm verify:*` by default for low-risk UI/copy changes.",
+      "- Review diff scope, Agent1 Allowed Files / Non-Scope / Do Not Touch, unrelated dirty changes, and PR branch cleanliness.",
+      "- Rerun scoped verification only when Agent2 evidence is missing, failed, mismatched with the diff, or the diff expands into shared/package/env/API/permission/data/business-rule/high-risk areas.",
+    ];
+  }
+
+  return [
+    "- Review Agent2's verification evidence first, then rerun targeted or full verification only when the evidence is missing, failed, or insufficient for the risk level.",
+    "- For high-risk changes, require the relevant full verification gate or block delivery with a clear reason.",
+  ];
+}
+
+function isLowRiskLevelOneRequest(request: WorkflowRequest) {
+  return request.taskLevel === "Level 1" && request.interpretation.riskFlags.length === 0;
 }
 
 function buildPriorArtifactsSection(
@@ -939,11 +1056,16 @@ export function getAgentHandoffBlocker(
   agentRole: AgentRole,
   artifact: string,
 ) {
+  const sections = extractHandoffSections(artifact.trim());
+
+  if (agentRole === "agent3") {
+    return getAgent3DeliveryBlocker(sections);
+  }
+
   if (agentRole !== "agent1") {
     return "";
   }
 
-  const sections = extractHandoffSections(artifact.trim());
   const canProceed = getHandoffSectionContent(sections, "Can Proceed");
   if (!canProceed || /^yes\b/i.test(canProceed.trim())) {
     return "";
@@ -958,6 +1080,33 @@ export function getAgentHandoffBlocker(
     .join("\n");
 
   return `Agent1 source check cannot proceed: ${clipHandoffText(summary || canProceed, 900)}`;
+}
+
+function getAgent3DeliveryBlocker(
+  sections: Array<{ heading: string; content: string }>,
+) {
+  const reviewResult = getHandoffSectionContent(sections, "Review Result");
+  const normalized = reviewResult
+    .toLowerCase()
+    .trim()
+    .replace(/^[-*]\s+/, "");
+  if (!normalized || /^pass\b/.test(normalized)) {
+    return "";
+  }
+
+  if (/^(block|blocked|fail|failed)\b/.test(normalized)) {
+    const summary = [
+      reviewResult,
+      getHandoffSectionContent(sections, "Unapproved Changes"),
+      getHandoffSectionContent(sections, "Human Decisions"),
+    ]
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .join("\n");
+    return `Agent3 delivery review blocked PR readiness: ${clipHandoffText(summary, 900)}`;
+  }
+
+  return "";
 }
 
 export function extractClarificationPromptFromArtifact(

@@ -72,6 +72,24 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
   }
 
   if (
+    normalized.includes("agent3 delivery review blocked") ||
+    normalized.includes("delivery review blocked") ||
+    normalized.includes("pr-ready") ||
+    normalized.includes("pr readiness") ||
+    normalized.includes("branch") ||
+    normalized.includes("unrelated")
+  ) {
+    return {
+      title: "PR 交付範圍不乾淨",
+      reason:
+        "Agent3 檢查到目前 branch、diff 或未核准變更含有非本需求內容，因此不能把這筆需求標成可發 PR。",
+      nextAction:
+        "切到乾淨的需求分支或 request-scoped worktree，保留本需求變更後再重跑 Agent3。",
+      original,
+    };
+  }
+
+  if (
     normalized.includes("missing confirmed spec") ||
     normalized.includes("business rule") ||
     normalized.includes("no confirmed product") ||

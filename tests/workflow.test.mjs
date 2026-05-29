@@ -88,6 +88,66 @@ test("workflow packet is role-specific and keeps implementation packet lean", ()
   assert.doesNotMatch(packet, /Delivery Report/);
 });
 
+test("Level 1 packets prefer scoped verification and Agent3 trusts Agent2 evidence", () => {
+  const request = sampleRequest({ taskLevel: "Level 1" });
+  const agent1Run = sampleRun({
+    agentRole: "agent1",
+    status: "completed",
+    artifact: [
+      "# Source Check Report",
+      "",
+      "## Confirmed Requirements",
+      "- Add UI copy.",
+      "",
+      "## Confirmed Scope",
+      "- App-local topbar UI only.",
+      "",
+      "## Allowed Files",
+      "- apps/admin-agent-web/src/components/AgentTopBar.vue",
+      "",
+      "## Non-Scope",
+      "- No API or permission changes.",
+      "",
+      "## Do Not Touch",
+      "- packages/**",
+      "",
+      "## Can Proceed",
+      "yes",
+      "",
+      "## Task Package For Agent2",
+      "- Run scoped component test.",
+    ].join("\n"),
+  });
+  const agent2Packet = buildWorkflowAgentPacket(request, "agent2", [agent1Run]);
+  const agent3Packet = buildWorkflowAgentPacket(request, "agent3", [
+    agent1Run,
+    sampleRun({
+      agentRole: "agent2",
+      status: "completed",
+      artifact: sampleImplementationResult(),
+    }),
+  ]);
+
+  assert.match(agent2Packet, /prefer scoped verification over full app verification/i);
+  assert.match(agent2Packet, /Do not run broad `pnpm verify:\*` by default/);
+  assert.match(agent3Packet, /Prefer trusting Agent2's `Commands Run`/);
+  assert.match(agent3Packet, /Do not rerun full `pnpm verify:\*` by default/);
+});
+
+test("high-risk packets keep full verification guidance", () => {
+  const request = sampleRequest({
+    taskLevel: "Level 3",
+    interpretation: {
+      ...sampleRequest().interpretation,
+      riskFlags: ["Touches API contract"],
+    },
+  });
+  const agent2Packet = buildWorkflowAgentPacket(request, "agent2", []);
+
+  assert.match(agent2Packet, /run the relevant full `pnpm verify:\*` gate/);
+  assert.doesNotMatch(agent2Packet, /Do not run broad `pnpm verify:\*` by default/);
+});
+
 test("workflow packet maps Azure Work Item reference to user-facing 單號", () => {
   const packet = buildWorkflowAgentPacket(sampleRequest(), "agent0", []);
 
@@ -464,7 +524,7 @@ test("workflow no-PR delivery is tracked as completed after Agent3 review", () =
       sampleRun({
         agentRole: "agent3",
         status: "completed",
-        artifact: "# Delivery Report\n\nNo PR required.",
+        artifact: sampleDeliveryReport(),
       }),
     ],
     prLinks: [],
@@ -482,6 +542,51 @@ test("workflow no-PR delivery is tracked as completed after Agent3 review", () =
     "agent3",
   );
 });
+
+function sampleDeliveryReport(overrides = {}) {
+  return [
+    "# Delivery Report",
+    "",
+    "## Review Result",
+    overrides.reviewResult ?? "- pass: no PR required.",
+    "",
+    "## Scope Compliance",
+    overrides.scopeCompliance ?? "- pass.",
+    "",
+    "## Unapproved Changes",
+    overrides.unapprovedChanges ?? "- none.",
+    "",
+    "## Verification Result",
+    overrides.verificationResult ?? "- Commands reviewed and passing.",
+    "",
+    "## Regression Risk",
+    overrides.regressionRisk ?? "- low.",
+    "",
+    "## Human Decisions",
+    overrides.humanDecisions ?? "- none.",
+  ].join("\n");
+}
+
+function sampleImplementationResult() {
+  return [
+    "# Implementation Result",
+    "",
+    "## Changed Files",
+    "- apps/admin-agent-web/src/components/AgentTopBar.vue",
+    "",
+    "## Commands Run",
+    "- pnpm --filter @odin/admin-agent-web test -- AgentTopBar.test.ts: pass.",
+    "",
+    "## Verification Result",
+    "- pass.",
+    "",
+    "## Scope Compliance",
+    "- No file outside Agent1 allowed files changed.",
+    "",
+    "## Human Decisions",
+    "- none.",
+  ].join("\n");
+}
 
 function sampleClarificationPromptArtifact() {
   return [

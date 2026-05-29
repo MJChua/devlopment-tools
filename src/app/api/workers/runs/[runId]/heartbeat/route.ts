@@ -12,7 +12,8 @@ export async function POST(
   try {
     const { runId } = await params;
     const { workerId, token } = parseWorkerAuth(request);
-    const run = heartbeatWorkerRun(workerId, token, runId);
+    const body = await request.json().catch(() => ({}));
+    const run = heartbeatWorkerRun(workerId, token, runId, body);
 
     return NextResponse.json(
       { run },
