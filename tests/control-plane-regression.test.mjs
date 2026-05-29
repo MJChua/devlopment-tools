@@ -10,6 +10,10 @@ const {
   getRecommendedTargetBranch,
 } = await import("../src/lib/repo-rule-engine.ts");
 const {
+  buildTeamPrDeliveryBranch,
+  getTeamPrBranchKind,
+  isTeamPrDeliveryBranch,
+  isTeamPrDeliveryTargetBranch,
   getTestWritePolicyMessage,
   isTestWriteAllowedBranch,
   normalizeBranchName,
@@ -54,6 +58,25 @@ test("testing-stage write policy allows only AITraining source branches", () => 
     getTestWritePolicyMessage("refs/heads/bug/775"),
     'Testing-stage Azure writes are limited to AITraining/ branches. "bug/775" is read-only.',
   );
+});
+
+test("formal PR delivery policy allows numbered feature and bug branches targeting develop", () => {
+  assert.equal(isTeamPrDeliveryBranch("feature/725"), true);
+  assert.equal(isTeamPrDeliveryBranch("refs/heads/bug/399"), true);
+  assert.equal(isTeamPrDeliveryBranch("feature/member-filter"), false);
+  assert.equal(isTeamPrDeliveryBranch("AITraining/test_p"), false);
+  assert.equal(isTeamPrDeliveryTargetBranch("develop"), true);
+  assert.equal(isTeamPrDeliveryTargetBranch("main"), false);
+  assert.equal(
+    buildTeamPrDeliveryBranch({ workItemId: "399", workItemType: "Bug" }),
+    "bug/399",
+  );
+  assert.equal(
+    buildTeamPrDeliveryBranch({ workItemId: "725", requestKind: "REQ" }),
+    "feature/725",
+  );
+  assert.equal(getTeamPrBranchKind({ workItemType: "Bug" }), "bug");
+  assert.equal(getTeamPrBranchKind({ requestKind: "BUG" }), "bug");
 });
 
 test("Work Item filter WIQL does not exclude states or types by default", () => {

@@ -13,6 +13,12 @@ import {
   normalizeRequestInputTemplateId,
   type RequestInputTemplateId,
 } from "./request-templates.ts";
+import {
+  buildTeamPrDeliveryBranch,
+  getTeamPrBranchKind,
+  TEAM_PR_BASE_BRANCH,
+  type TeamPrBranchKind,
+} from "./test-write-policy.ts";
 
 export const WORKFLOW_STAGES = [
   "intake",
@@ -121,6 +127,23 @@ export type WorkflowResumeSnapshot = {
   latestClarification: string;
   verificationSummary: string[];
   executionRepoPath: string;
+  prDeliveryTrace: PrDeliveryTrace | null;
+};
+export type PrDiscoveryStatus =
+  | "pending"
+  | "found"
+  | "not_found"
+  | "ambiguous"
+  | "failed";
+export type PrDeliveryTrace = {
+  baseBranch: string;
+  sourceBranch: string;
+  workItemId: string;
+  branchKind: TeamPrBranchKind | "";
+  discoveryStatus: PrDiscoveryStatus;
+  pullRequestId?: number;
+  webUrl?: string;
+  reason?: string;
 };
 export type WorkflowAgentPacketContext = {
   repoCandidateScan?: RepoCandidateScan | null;
@@ -451,6 +474,101 @@ export function createWorkflowRequestFromInput(
   };
 }
 
+export function getPrDeliveryTraceForRequest(
+  request: Pick<
+    WorkflowRequest,
+    | "deliveryMode"
+    | "azureReferenceType"
+    | "azureReferenceId"
+    | "azureReferenceEvidence"
+    | "kind"
+  >,
+): PrDeliveryTrace {
+  if (request.deliveryMode !== "draft_pr") {
+    return emptyPrDeliveryTrace("PR delivery is not required for this request.");
+  }
+
+  if (
+    request.azureReferenceType !== "work-item" ||
+    !/^\d+$/.test(request.azureReferenceId.trim())
+  ) {
+    return emptyPrDeliveryTrace(
+      "Draft PR delivery needs an Azure Work Item number to derive the team branch.",
+    );
+  }
+
+  const workItemId = request.azureReferenceId.trim();
+  const branchKind = getTeamPrBranchKind({
+    workItemType: request.azureReferenceEvidence.workItemType,
+    requestKind: request.kind,
+  });
+  const sourceBranch = buildTeamPrDeliveryBranch({
+    workItemId,
+    workItemType: request.azureReferenceEvidence.workItemType,
+    requestKind: request.kind,
+  });
+
+  return {
+    baseBranch: TEAM_PR_BASE_BRANCH,
+    sourceBranch,
+    workItemId,
+    branchKind,
+    discoveryStatus: "pending",
+    reason:
+      "Waiting for the request branch to be pushed and for Azure Repos to expose the active PR.",
+  };
+}
+
+export function normalizePrDeliveryTrace(value: unknown): PrDeliveryTrace | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const input = value as Partial<PrDeliveryTrace>;
+  const baseBranch =
+    requireOptionalTrimmed(input.baseBranch) || TEAM_PR_BASE_BRANCH;
+  const sourceBranch = requireOptionalTrimmed(input.sourceBranch);
+  const workItemId = requireOptionalTrimmed(input.workItemId);
+  const branchKind =
+    input.branchKind === "feature" || input.branchKind === "bug"
+      ? input.branchKind
+      : "";
+  const discoveryStatus = normalizePrDiscoveryStatus(input.discoveryStatus);
+  const pullRequestId = Number(input.pullRequestId);
+  const trace: PrDeliveryTrace = {
+    baseBranch,
+    sourceBranch,
+    workItemId,
+    branchKind,
+    discoveryStatus,
+    reason: requireOptionalTrimmed(input.reason),
+  };
+
+  if (Number.isInteger(pullRequestId) && pullRequestId > 0) {
+    trace.pullRequestId = pullRequestId;
+  }
+
+  const webUrl = requireOptionalTrimmed(input.webUrl);
+  if (webUrl) {
+    trace.webUrl = webUrl;
+  }
+
+  return isEmptyPrDeliveryTrace(trace) ? null : trace;
+}
+
+export function isEmptyPrDeliveryTrace(
+  trace: PrDeliveryTrace | null | undefined,
+) {
+  return (
+    !trace ||
+    (!trace.sourceBranch &&
+      !trace.workItemId &&
+      !trace.pullRequestId &&
+      !trace.webUrl &&
+      !trace.reason)
+  );
+}
+
 export function getNextAgentRole(
   request: WorkflowRequest,
   runs: WorkerRun[] = [],
@@ -564,6 +682,15 @@ function buildPacketHeader(request: WorkflowRequest, agentRole: AgentRole) {
 
   if (agentRole === "agent1") {
     lines.push("Source strictness: contextual");
+  }
+
+  if (request.deliveryMode === "draft_pr") {
+    const trace = getPrDeliveryTraceForRequest(request);
+    lines.push(`PR Delivery Base Branch: ${trace.baseBranch}`);
+    lines.push(`PR Delivery Source Branch: ${trace.sourceBranch || "(pending work item)"}`);
+    lines.push(`PR Delivery Work Item: ${trace.workItemId || "(not available)"}`);
+    lines.push(`PR Delivery Branch Kind: ${trace.branchKind || "(not available)"}`);
+    lines.push(`PR Discovery Status: ${trace.discoveryStatus}`);
   }
 
   return lines;
@@ -909,6 +1036,7 @@ function buildAgent2PacketBody(
     "",
     "- Implement only confirmed scope from Source Check Report / Task Package; do not add, delete, or modify files outside that scope.",
     "- Stop before env changes, package installation, deployment, file deletion, large refactor, or shared core module modification.",
+    "- When draft PR delivery is enabled, leave Azure PR creation/tracking to the App and Local Worker branch flow; do not call Azure PR create APIs yourself.",
     "- Azure writes require human approval in the control plane.",
   ];
 }
@@ -966,6 +1094,7 @@ function buildAgent3PacketBody(
     "- Review against confirmed sources, scope, implementation result, diff, and verification evidence.",
     "- Flag unapproved file creation, file deletion, unrelated modification, or scope expansion as blockers.",
     "- Do not justify out-of-scope changes or mark provisional checks as QA-confirmed.",
+    "- Confirm the request branch is clean and scoped; Azure PR creation/tracking is handled by the App after PR Ready.",
     "- Merge PR, abandon PR, branch policy, build trigger, deploy, and Work Item field mutation are out of MVP scope.",
   ];
 }
@@ -1097,6 +1226,9 @@ function buildResumeSnapshotSection(
     snapshot.executionRepoPath
       ? `- Execution Repo / Worktree: ${snapshot.executionRepoPath}`
       : "- Execution Repo / Worktree: not recorded",
+    snapshot.prDeliveryTrace
+      ? `- PR Delivery: ${formatPrDeliveryTrace(snapshot.prDeliveryTrace)}`
+      : "- PR Delivery: not recorded",
     "",
     "### Confirmed Requirements",
     ...formatListOrNone(snapshot.confirmedRequirements),
@@ -1257,6 +1389,7 @@ export function normalizeWorkflowResumeSnapshot(
     latestClarification: requireOptionalTrimmed(input.latestClarification),
     verificationSummary: normalizeSnapshotList(input.verificationSummary),
     executionRepoPath: requireOptionalTrimmed(input.executionRepoPath),
+    prDeliveryTrace: normalizePrDeliveryTrace(input.prDeliveryTrace),
   };
 
   return isEmptyResumeSnapshot(snapshot) ? null : snapshot;
@@ -1278,7 +1411,8 @@ export function isEmptyResumeSnapshot(
     snapshot.verificationSummary.length === 0 &&
     !snapshot.latestBlocker &&
     !snapshot.latestClarification &&
-    !snapshot.executionRepoPath
+    !snapshot.executionRepoPath &&
+    isEmptyPrDeliveryTrace(snapshot.prDeliveryTrace)
   );
 }
 
@@ -1338,7 +1472,37 @@ function emptyResumeSnapshot(): WorkflowResumeSnapshot {
     latestClarification: "",
     verificationSummary: [],
     executionRepoPath: "",
+    prDeliveryTrace: null,
   };
+}
+
+function emptyPrDeliveryTrace(reason: string): PrDeliveryTrace {
+  return {
+    baseBranch: TEAM_PR_BASE_BRANCH,
+    sourceBranch: "",
+    workItemId: "",
+    branchKind: "",
+    discoveryStatus: "pending",
+    reason,
+  };
+}
+
+function normalizePrDiscoveryStatus(value: unknown): PrDiscoveryStatus {
+  return value === "found" ||
+    value === "not_found" ||
+    value === "ambiguous" ||
+    value === "failed"
+    ? value
+    : "pending";
+}
+
+function formatPrDeliveryTrace(trace: PrDeliveryTrace) {
+  const branchPair = trace.sourceBranch
+    ? `${trace.sourceBranch} -> ${trace.baseBranch || TEAM_PR_BASE_BRANCH}`
+    : `source pending -> ${trace.baseBranch || TEAM_PR_BASE_BRANCH}`;
+  const pr = trace.pullRequestId ? `, PR #${trace.pullRequestId}` : "";
+  const reason = trace.reason ? ` (${trace.reason})` : "";
+  return `${trace.discoveryStatus}: ${branchPair}${pr}${reason}`;
 }
 
 function isAgentRole(value: unknown): value is AgentRole {
@@ -1815,16 +1979,16 @@ export function evaluateWorkflowStageGate(
 
   if (request.status === "pr_ready") {
     humanDecisions.push(
-      "Review Agent3 delivery artifact and approve Azure draft PR creation.",
+      "Review Agent3 delivery artifact and track the Azure PR that appears for the pushed request branch.",
     );
     return stageGateResult({
       status: "human-decision",
-      label: "PR write approval required",
+      label: "Azure PR tracking required",
       summary:
-        "The workflow is ready for a guarded Azure draft PR write after human approval.",
+        "The workflow is ready to discover and track the active Azure PR for the pushed request branch.",
       blockers,
       nextActions: [
-        "Approve guarded draft PR creation when the App requests Azure write confirmation.",
+        "Run Azure PR discovery or use the manual fallback if Azure Repos does not expose the PR yet.",
       ],
       humanDecisions,
       recoveryKind: "human_decision",
@@ -2009,8 +2173,9 @@ function formatDeliveryModeGuidance(deliveryMode: DeliveryMode) {
 
   return [
     "- This request is expected to end at PR Ready after Agent3 review.",
-    "- Prepare delivery evidence for a guarded Azure draft PR, but do not write Azure state from the Agent.",
-    "- Azure draft PR creation still requires human approval in the App.",
+    `- Team PR flow uses ${TEAM_PR_BASE_BRANCH} as the base branch and a source branch derived from the Azure Work Item, such as feature/{id} or bug/{id}.`,
+    "- Do not create, merge, abandon, approve, deploy, or update an Azure PR from the Agent.",
+    "- After the request branch is committed and pushed, the App will discover and track the active Azure PR automatically.",
   ].join("\n");
 }
 

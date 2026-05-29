@@ -7,6 +7,7 @@ const {
   evaluateWorkflowStageGate,
   extractClarificationPromptFromArtifact,
   getNextAgentRole,
+  getPrDeliveryTraceForRequest,
   getStageAfterCompletedAgent,
   getStageForQueuedAgent,
 } = await import("../src/lib/control-plane-workflow.ts");
@@ -176,6 +177,7 @@ test("resume snapshot does not replace missing required handoff", () => {
       latestClarification: "",
       verificationSummary: [],
       executionRepoPath: "C:\\workspace\\repo",
+      prDeliveryTrace: null,
     },
   });
   const packet = buildWorkflowAgentPacket(request, "agent2", []);
@@ -299,6 +301,43 @@ test("workflow packet separates verified Azure Work Item evidence from tracking 
   assert.match(verifiedPacket, /Title: Header role label/);
   assert.match(verifiedPacket, /State: Active/);
   assert.doesNotMatch(verifiedPacket, /Tracking reference only/);
+});
+
+test("draft PR packet derives team branch trace from Azure Work Item", () => {
+  const bugRequest = sampleRequest({
+    kind: "BUG",
+    azureReferenceEvidence: {
+      status: "verified",
+      referenceType: "work-item",
+      referenceId: "795",
+      checkedAt: "2026-05-28T03:00:00.000Z",
+      title: "Header role label",
+      workItemType: "Bug",
+      workItemState: "Active",
+      assignedTo: "QA",
+      areaPath: "Project",
+      iterationPath: "Project\\Sprint 1",
+      webUrl: "https://dev.azure.com/org/project/_workitems/edit/795",
+      summary: "Header role label",
+      error: "",
+    },
+  });
+  const trace = getPrDeliveryTraceForRequest(bugRequest);
+  const packet = buildWorkflowAgentPacket(bugRequest, "agent2", [
+    sampleRun({
+      agentRole: "agent1",
+      status: "completed",
+      artifact: completeAgent1Artifact(),
+    }),
+  ]);
+
+  assert.equal(trace.baseBranch, "develop");
+  assert.equal(trace.sourceBranch, "bug/795");
+  assert.equal(trace.branchKind, "bug");
+  assert.match(packet, /PR Delivery Base Branch: develop/);
+  assert.match(packet, /PR Delivery Source Branch: bug\/795/);
+  assert.match(packet, /PR Delivery Work Item: 795/);
+  assert.match(packet, /App will discover and track the active Azure PR automatically/);
 });
 
 test("UI-only visual evidence mode narrows Agent1 source requirements", () => {
@@ -600,7 +639,7 @@ test("workflow waits for Local Worker/Codex interpretation before high-risk stop
   assert.match(stopped.summary, /Local Worker\/Codex flagged/);
 });
 
-test("workflow PR-ready gate requires human Azure write approval", () => {
+test("workflow PR-ready gate waits for Azure PR tracking", () => {
   const stageGate = evaluateWorkflowStageGate({
     request: sampleRequest({ status: "pr_ready" }),
     runs: [],
@@ -609,7 +648,7 @@ test("workflow PR-ready gate requires human Azure write approval", () => {
   });
 
   assert.equal(stageGate.status, "human-decision");
-  assert.match(stageGate.summary, /guarded Azure draft PR write/);
+  assert.match(stageGate.summary, /discover and track the active Azure PR/);
   assert.equal(stageGate.humanDecisions.length, 1);
 });
 
@@ -682,6 +721,36 @@ function sampleImplementationResult() {
     "",
     "## Human Decisions",
     "- none.",
+  ].join("\n");
+}
+
+function completeAgent1Artifact() {
+  return [
+    "# Source Check Report",
+    "",
+    "## Confirmed Requirements",
+    "- Update the confirmed UI behavior.",
+    "",
+    "## Confirmed Scope",
+    "- Header UI only.",
+    "",
+    "## Allowed Files",
+    "- apps/admin-agent-web/src/components/AgentTopBar.vue",
+    "",
+    "## Non-Scope",
+    "- Do not change API behavior.",
+    "",
+    "## Do Not Touch",
+    "- package.json",
+    "",
+    "## Blocking Questions",
+    "- none",
+    "",
+    "## Can Proceed",
+    "yes",
+    "",
+    "## Task Package For Agent2",
+    "- Make the scoped UI change and run targeted verification.",
   ].join("\n");
 }
 

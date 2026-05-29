@@ -1223,6 +1223,7 @@ test("PR traceability links only verified PR-ready draft PR requests", async () 
     createRequest,
     getRequestDetail,
     linkPullRequestToWorkflow,
+    recordPullRequestDiscovery,
     registerWorker,
     updateRequestStage,
   } = await import("../src/lib/control-plane-db.ts");
@@ -1270,10 +1271,35 @@ test("PR traceability links only verified PR-ready draft PR requests", async () 
   );
 
   updateRequestStage(request.requestId, "pr_ready");
+  const notFoundTrace = recordPullRequestDiscovery({
+    requestId: request.requestId,
+    trace: {
+      sourceBranch: "feature/399",
+      baseBranch: "develop",
+      workItemId: "399",
+      branchKind: "feature",
+      discoveryStatus: "not_found",
+      reason: "No active PR found yet.",
+    },
+    actor: "test",
+  });
+  assert.equal(notFoundTrace.discoveryStatus, "not_found");
+  assert.equal(
+    getRequestDetail(request.requestId).request.resumeSnapshot.prDeliveryTrace
+      .sourceBranch,
+    "feature/399",
+  );
+
   const link = linkPullRequestToWorkflow({
     requestId: request.requestId,
     pullRequestId: 399,
     webUrl: "https://dev.azure.com/odin-tech/project/_git/repo/pullrequest/399",
+    trace: {
+      sourceBranch: "feature/399",
+      baseBranch: "develop",
+      workItemId: "399",
+      branchKind: "feature",
+    },
     actor: "test",
   });
   const linked = getRequestDetail(request.requestId);
@@ -1281,6 +1307,10 @@ test("PR traceability links only verified PR-ready draft PR requests", async () 
   assert.equal(linked.request.status, "pr_created");
   assert.equal(linked.prLinks.length, 1);
   assert.equal(linked.prLinks[0].id, link.id);
+  assert.equal(
+    linked.request.resumeSnapshot.prDeliveryTrace.discoveryStatus,
+    "found",
+  );
 
   const duplicate = linkPullRequestToWorkflow({
     requestId: request.requestId,

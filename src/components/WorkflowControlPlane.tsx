@@ -73,10 +73,12 @@ import {
 import {
   PACKET_SIZE_WARNING_CHARS,
   RUN_SOFT_TIMEOUT_MS,
+  getPrDeliveryTraceForRequest,
   getNextAgentRole,
   type AzureReferenceEvidence,
   type ClarificationPrompt,
   type DeliveryMode,
+  type PrDeliveryTrace,
   type RequestAttachment,
   type RequestEvidenceMode,
   type StageGateResult,
@@ -207,6 +209,19 @@ type WorkItemFilterOptions = {
 };
 
 type WorkerRunView = WorkflowRequestDetail["runs"][number];
+type PullRequestDiscoveryMatch = {
+  pullRequestId: number;
+  title: string;
+  status: string;
+  sourceBranch: string;
+  targetBranch: string;
+  webUrl: string;
+};
+type PullRequestDiscoveryResult = {
+  trace: PrDeliveryTrace;
+  link?: WorkflowRequestDetail["prLinks"][number];
+  matches?: PullRequestDiscoveryMatch[];
+};
 type ConnectionPulseTone = "green" | "amber" | "red";
 type StagedRequestAttachment = {
   id: string;
@@ -286,6 +301,12 @@ export function WorkflowControlPlane() {
   >([]);
   const [workerForm, setWorkerForm] = useState<WorkerForm>(DEFAULT_WORKER_FORM);
   const [prLinkForm, setPrLinkForm] = useState({ pullRequestId: "" });
+  const [prDiscoveryState, setPrDiscoveryState] = useState<LoadState>("idle");
+  const [prDiscoveryMessage, setPrDiscoveryMessage] = useState("");
+  const [prDiscoveryMatches, setPrDiscoveryMatches] = useState<
+    PullRequestDiscoveryMatch[]
+  >([]);
+  const prDiscoveryKeyRef = useRef("");
   const [lastRegisteredWorker, setLastRegisteredWorker] =
     useState<WorkerRegistrationWithToken | null>(null);
   const [repoCandidates, setRepoCandidates] = useState<RepositoryCandidate[]>([]);
@@ -412,6 +433,7 @@ export function WorkflowControlPlane() {
   const hasAzureWorkItemAccess =
     Boolean(workerForm.azurePat.trim()) ||
     (launcherState.available && launcherState.hasAzurePat);
+  const hasPrDiscoveryAccess = hasAzureWorkItemAccess;
   const workerHasActiveRequest = Boolean(
     currentWorker &&
       requests.some(
@@ -773,6 +795,47 @@ export function WorkflowControlPlane() {
     selectedRequestId,
   ]);
 
+  useEffect(() => {
+    if (
+      !selectedRequest ||
+      selectedRequest.deliveryMode !== "draft_pr" ||
+      selectedRequest.status !== "pr_ready" ||
+      !hasPrDiscoveryAccess ||
+      detail?.prLinks.length
+    ) {
+      return;
+    }
+
+    const lastTrace = selectedRequest.resumeSnapshot?.prDeliveryTrace;
+    if (
+      lastTrace?.discoveryStatus === "not_found" ||
+      lastTrace?.discoveryStatus === "ambiguous" ||
+      lastTrace?.discoveryStatus === "failed"
+    ) {
+      return;
+    }
+
+    const key = `${selectedRequest.requestId}:${launcherState.hasAzurePat}:${Boolean(workerForm.azurePat.trim())}`;
+    if (prDiscoveryKeyRef.current === key || prDiscoveryState === "loading") {
+      return;
+    }
+
+    prDiscoveryKeyRef.current = key;
+    void discoverPullRequestLink({ silent: true });
+    // Auto-discovery intentionally calls the current helper with current PAT/launcher state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    detail?.prLinks.length,
+    hasPrDiscoveryAccess,
+    launcherState.hasAzurePat,
+    prDiscoveryState,
+    selectedRequest?.deliveryMode,
+    selectedRequest?.requestId,
+    selectedRequest?.status,
+    selectedRequest?.resumeSnapshot?.prDeliveryTrace?.discoveryStatus,
+    workerForm.azurePat,
+  ]);
+
   async function loadRuntimeConfig() {
     try {
       const result = await fetchJson<RuntimeConfig>("/api/runtime-config");
@@ -947,6 +1010,45 @@ export function WorkflowControlPlane() {
           : "/azure/work-items";
       return fetchLauncherJson<T>(
         launcherPath,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            ...payload,
+            workerId,
+          }),
+        },
+      );
+    }
+
+    throw new Error("Azure PAT is required.");
+  }
+
+  async function fetchPullRequestDiscovery(requestId: string) {
+    const payload = {
+      actor: currentOwner,
+      config: DEFAULT_AZURE_CONFIG,
+    };
+    const token = workerForm.azurePat.trim();
+    if (token) {
+      return fetchJson<PullRequestDiscoveryResult>(
+        `/api/requests/${requestId}/pr-discover`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            ...payload,
+            credentials: { pat: token },
+          }),
+        },
+      );
+    }
+
+    const workerId =
+      currentWorker?.workerId ||
+      requestForm.assignedWorkerId ||
+      createLocalWorkerId(currentOwner);
+    if (launcherState.available && launcherState.hasAzurePat && workerId) {
+      return fetchLauncherJson<PullRequestDiscoveryResult>(
+        `/requests/${encodeURIComponent(requestId)}/pr-discover`,
         {
           method: "POST",
           body: JSON.stringify({
@@ -1743,7 +1845,7 @@ export function WorkflowControlPlane() {
     }
 
     const azurePat = workerForm.azurePat.trim();
-    if (!azurePat) {
+    if (!hasPrDiscoveryAccess) {
       setState("error");
       setMessage("需要 Azure PAT 才能驗證並連結 Azure PR。");
       return;
@@ -1753,18 +1855,38 @@ export function WorkflowControlPlane() {
     setMessage("正在驗證並連結 Azure PR...");
 
     try {
-      await fetchJson<{ link: unknown }>(
-        `/api/requests/${selectedRequest.requestId}/pr-link`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            pullRequestId: prLinkForm.pullRequestId,
-            actor: requestForm.owner || "control-plane",
-            config: DEFAULT_AZURE_CONFIG,
-            credentials: { pat: azurePat },
-          }),
-        },
-      );
+      const payload = {
+        pullRequestId: prLinkForm.pullRequestId,
+        actor: requestForm.owner || "control-plane",
+        config: DEFAULT_AZURE_CONFIG,
+      };
+      if (azurePat) {
+        await fetchJson<{ link: unknown }>(
+          `/api/requests/${selectedRequest.requestId}/pr-link`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              ...payload,
+              credentials: { pat: azurePat },
+            }),
+          },
+        );
+      } else {
+        const workerId =
+          currentWorker?.workerId ||
+          requestForm.assignedWorkerId ||
+          createLocalWorkerId(currentOwner);
+        await fetchLauncherJson<{ link: unknown }>(
+          `/requests/${encodeURIComponent(selectedRequest.requestId)}/pr-link`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              ...payload,
+              workerId,
+            }),
+          },
+        );
+      }
       setPrLinkForm({ pullRequestId: "" });
       await Promise.all([
         refreshAll(),
@@ -1775,6 +1897,55 @@ export function WorkflowControlPlane() {
     } catch (error) {
       setState("error");
       setMessage(formatError(error));
+    }
+  }
+
+  async function discoverPullRequestLink(options: { silent?: boolean } = {}) {
+    if (!selectedRequest) {
+      return;
+    }
+
+    setPrDiscoveryState("loading");
+    setPrDiscoveryMessage(
+      options.silent ? "正在自動偵測 Azure PR..." : "正在偵測 Azure PR...",
+    );
+    setPrDiscoveryMatches([]);
+
+    try {
+      const result = await fetchPullRequestDiscovery(selectedRequest.requestId);
+      setPrDiscoveryMatches(result.matches ?? []);
+      if (result.trace.discoveryStatus === "found") {
+        setPrDiscoveryState("success");
+        setPrDiscoveryMessage(
+          result.trace.pullRequestId
+            ? `已找到 Azure PR #${result.trace.pullRequestId}，並完成追蹤。`
+            : "已找到 Azure PR，並完成追蹤。",
+        );
+      } else if (result.trace.discoveryStatus === "ambiguous") {
+        setPrDiscoveryState("error");
+        setPrDiscoveryMessage(
+          "找到多筆符合分支的 Azure PR，請用下方手動補登 PR ID。",
+        );
+      } else if (result.trace.discoveryStatus === "not_found") {
+        setPrDiscoveryState("idle");
+        setPrDiscoveryMessage(
+          "分支已推送後，Azure Repos 尚未出現對應 PR。可稍後重新偵測或手動補登。",
+        );
+      } else {
+        setPrDiscoveryState("error");
+        setPrDiscoveryMessage(result.trace.reason || "Azure PR 偵測失敗。");
+      }
+
+      await Promise.all([
+        refreshAll(),
+        refreshSelectedRequest(selectedRequest.requestId),
+      ]);
+    } catch (error) {
+      setPrDiscoveryState("error");
+      setPrDiscoveryMessage(formatError(error));
+      if (!options.silent) {
+        setMessage(formatError(error));
+      }
     }
   }
 
@@ -2517,7 +2688,7 @@ export function WorkflowControlPlane() {
                 ) : null}
                 {selectedRequest.deliveryMode === "draft_pr" &&
                 selectedRequest.status === "pr_ready" &&
-                !workerForm.azurePat.trim() ? (
+                !hasPrDiscoveryAccess ? (
                   <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm leading-6 text-blue-900">
                     補上 Azure PAT 後，App 才能驗證既有 Azure PR 並連結到此需求；不會自動 merge、abandon 或 deploy。
                   </div>
@@ -2545,9 +2716,13 @@ export function WorkflowControlPlane() {
                   selectedRequest.status === "pr_created") ? (
                   <PullRequestTraceability
                     detail={detail}
+                    discoveryMatches={prDiscoveryMatches}
+                    discoveryMessage={prDiscoveryMessage}
+                    discoveryState={prDiscoveryState}
                     form={prLinkForm}
-                    hasAzurePat={Boolean(workerForm.azurePat.trim())}
+                    hasAzurePat={hasPrDiscoveryAccess}
                     onChange={setPrLinkForm}
+                    onDiscover={() => discoverPullRequestLink()}
                     onSubmit={recordPullRequestLink}
                   />
                 ) : null}
@@ -4118,7 +4293,7 @@ function AzureNumberIntake({
   if (!hasPat) {
     return (
       <p className="text-sm leading-6 text-slate-600">
-        提供 PAT 後可選擇 Azure 單號，協助後續建立 draft PR 與追蹤需求。
+        提供 PAT 後可選擇 Azure 單號，協助後續準備正式分支並追蹤 PR。
       </p>
     );
   }
@@ -4855,7 +5030,163 @@ function AgentRuns({ runs }: { runs: WorkflowRequestDetail["runs"] }) {
   );
 }
 
-function PullRequestTraceability({
+type PullRequestTraceabilityProps = {
+  detail: WorkflowRequestDetail;
+  discoveryMatches: PullRequestDiscoveryMatch[];
+  discoveryMessage: string;
+  discoveryState: LoadState;
+  form: { pullRequestId: string };
+  hasAzurePat: boolean;
+  onChange: (form: { pullRequestId: string }) => void;
+  onDiscover: () => void;
+  onSubmit: () => void;
+};
+
+function PullRequestTraceabilityPanel({
+  detail,
+  discoveryMatches,
+  discoveryMessage,
+  discoveryState,
+  form,
+  hasAzurePat,
+  onChange,
+  onDiscover,
+  onSubmit,
+}: PullRequestTraceabilityProps) {
+  const canSubmit = hasAzurePat && Boolean(form.pullRequestId.trim());
+  const trace =
+    detail.request.resumeSnapshot?.prDeliveryTrace ??
+    getPrDeliveryTraceForRequest(detail.request);
+  const hasTrackedPr = detail.prLinks.length > 0;
+  const traceLabel = trace.sourceBranch
+    ? `${trace.sourceBranch} -> ${trace.baseBranch}`
+    : `等待 Azure Work Item -> ${trace.baseBranch}`;
+
+  return (
+    <div className="rounded-md border border-slate-200 bg-white p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="text-sm font-semibold text-slate-950">
+          Azure PR 追蹤
+        </div>
+        <Badge variant={hasTrackedPr ? "default" : "secondary"}>
+          {formatPrDiscoveryStatus(trace.discoveryStatus)}
+        </Badge>
+      </div>
+      <p className="mt-1 text-sm text-slate-600">
+        App 會依團隊分支自動偵測 Azure Repos 的 active PR；不會建立、merge、abandon 或 deploy。
+      </p>
+      <div className="mt-3 grid gap-2 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700 md:grid-cols-3">
+        <div>
+          <div className="text-xs font-semibold text-slate-500">分支</div>
+          <div className="mt-1 break-all font-mono text-xs">{traceLabel}</div>
+        </div>
+        <div>
+          <div className="text-xs font-semibold text-slate-500">Azure 單號</div>
+          <div className="mt-1">{trace.workItemId || "未提供"}</div>
+        </div>
+        <div>
+          <div className="text-xs font-semibold text-slate-500">狀態</div>
+          <div className="mt-1">{trace.reason || "等待偵測"}</div>
+        </div>
+      </div>
+      {!hasAzurePat ? (
+        <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          需要 Azure PAT，App 才能讀取 Azure Repos 並自動追蹤 PR。
+        </div>
+      ) : null}
+      {discoveryMessage ? (
+        <div
+          className={`mt-3 rounded-md border p-3 text-sm ${
+            discoveryState === "error"
+              ? "border-red-200 bg-red-50 text-red-900"
+              : discoveryState === "success"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                : "border-blue-200 bg-blue-50 text-blue-900"
+          }`}
+        >
+          {discoveryMessage}
+        </div>
+      ) : null}
+      {discoveryMatches.length > 1 ? (
+        <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          找到多筆 PR 候選，請確認後在下方手動補登 PR ID：{" "}
+          {discoveryMatches.map((match) => `#${match.pullRequestId}`).join(", ")}
+        </div>
+      ) : null}
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button
+          className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+          disabled={!hasAzurePat || discoveryState === "loading" || hasTrackedPr}
+          onClick={onDiscover}
+          type="button"
+        >
+          {discoveryState === "loading" ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <RefreshCw className="h-4 w-4" />
+          )}
+          重新偵測
+        </button>
+      </div>
+      <details className="mt-3 rounded-md border border-slate-200 bg-white">
+        <summary className="cursor-pointer px-3 py-2 text-sm font-semibold text-slate-800">
+          手動補登 PR ID
+        </summary>
+        <div className="grid gap-3 border-t border-slate-200 p-3 md:grid-cols-[160px_auto]">
+          <TextField
+            label="PR ID"
+            value={form.pullRequestId}
+            onChange={(pullRequestId) => onChange({ pullRequestId })}
+            placeholder="399"
+          />
+          <button
+            className="inline-flex items-center justify-center gap-2 self-end rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+            disabled={!canSubmit}
+            onClick={onSubmit}
+            type="button"
+          >
+            <GitPullRequest className="h-4 w-4" />
+            補登 PR
+          </button>
+        </div>
+      </details>
+      {detail.prLinks.length > 0 ? (
+        <div className="mt-3 flex flex-col gap-2">
+          {detail.prLinks.map((link) => (
+            <div
+              className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm"
+              key={link.id}
+            >
+              <div className="font-semibold text-slate-950">
+                Azure PR #{link.pullRequestId}
+              </div>
+              {link.webUrl ? (
+                <a
+                  className="break-all text-blue-700 underline"
+                  href={link.webUrl}
+                  rel="noreferrer"
+                  target="_blank"
+                >
+                  {link.webUrl}
+                </a>
+              ) : null}
+              <div className="mt-1 text-xs text-slate-500">
+                記錄時間 {link.createdAt}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PullRequestTraceability(props: PullRequestTraceabilityProps) {
+  void PullRequestTraceabilityLegacy;
+  return <PullRequestTraceabilityPanel {...props} />;
+}
+
+function PullRequestTraceabilityLegacy({
   detail,
   form,
   hasAzurePat,
@@ -5403,6 +5734,18 @@ function formatUiWorkflowStage(stage: WorkflowRequest["status"]) {
   return labels[stage];
 }
 
+function formatPrDiscoveryStatus(status: PrDeliveryTrace["discoveryStatus"]) {
+  const labels: Record<PrDeliveryTrace["discoveryStatus"], string> = {
+    pending: "等待推送",
+    found: "已找到 PR",
+    not_found: "未找到 PR",
+    ambiguous: "多筆候選",
+    failed: "偵測失敗",
+  };
+
+  return labels[status];
+}
+
 function formatUiDeliveryMode(deliveryMode: DeliveryMode) {
   return deliveryMode === "no_pr" ? "不需要 PR" : "需要 draft PR";
 }
@@ -5516,13 +5859,25 @@ function formatStageGateDisplay(stageGate: StageGateResult) {
     };
   }
 
+  if (
+    stageGate.status === "human-decision" &&
+    stageGate.label.toLowerCase().includes("pr")
+  ) {
+    return {
+      status: statusLabels[stageGate.status],
+      label: "等待 Azure PR 追蹤",
+      summary:
+        "Agent3 已完成審查，App 會偵測並追蹤 Azure Repos 中對應分支的 active PR。",
+    };
+  }
+
   if (stageGate.status === "human-decision") {
     const isPrApproval = stageGate.label.toLowerCase().includes("pr");
     return {
       status: statusLabels[stageGate.status],
-      label: isPrApproval ? "需要 PR 寫入核准" : "需要人工確認",
+      label: isPrApproval ? "等待 Azure PR 追蹤" : "需要人工確認",
       summary: isPrApproval
-        ? "Agent3 已完成審查，等待人工核准後才會進行 Azure draft PR 寫入。"
+        ? "Agent3 已完成審查，App 會偵測並追蹤 Azure Repos 中對應分支的 active PR。"
         : "此需求包含需要人工確認的範圍或風險，App 不會自動續跑。",
     };
   }
@@ -5558,14 +5913,28 @@ function formatStageGateListItem(item: string) {
     item ===
     "Review Agent3 delivery artifact and approve Azure draft PR creation."
   ) {
-    return "檢查 Agent3 交付產物，並人工核准 Azure draft PR。";
+    return "檢查 Agent3 交付結果，並追蹤 Azure Repos 中對應分支產生的 PR。";
   }
 
   if (
     item ===
     "Approve guarded draft PR creation when the App requests Azure write confirmation."
   ) {
-    return "當 App 要求 Azure 寫入確認時，人工核准建立 draft PR。";
+    return "執行 Azure PR 偵測；若 Azure 尚未出現 PR，再用手動補登。";
+  }
+
+  if (
+    item ===
+    "Review Agent3 delivery artifact and track the Azure PR that appears for the pushed request branch."
+  ) {
+    return "檢查 Agent3 交付結果，並追蹤 Azure Repos 中對應分支產生的 PR。";
+  }
+
+  if (
+    item ===
+    "Run Azure PR discovery or use the manual fallback if Azure Repos does not expose the PR yet."
+  ) {
+    return "執行 Azure PR 偵測；若 Azure 尚未出現 PR，再用手動補登。";
   }
 
   if (item.startsWith("Dispatch ")) {

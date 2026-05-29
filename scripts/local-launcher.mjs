@@ -153,11 +153,17 @@ async function handleRequest(request, response) {
     }
 
     const workItemDetailMatch = url.pathname.match(/^\/azure\/work-item\/(\d+)$/);
+    const prDiscoverMatch = url.pathname.match(
+      /^\/requests\/([^/]+)\/pr-discover$/,
+    );
+    const prLinkMatch = url.pathname.match(/^\/requests\/([^/]+)\/pr-link$/);
     if (
       request.method === "POST" &&
       (url.pathname === "/azure/iterations" ||
         url.pathname === "/azure/work-items" ||
-        workItemDetailMatch)
+        workItemDetailMatch ||
+        prDiscoverMatch ||
+        prLinkMatch)
     ) {
       const payload = await readJsonBody(request);
       const workerId = String(payload.workerId || "").trim();
@@ -166,6 +172,10 @@ async function handleRequest(request, response) {
       }
       const apiPath = workItemDetailMatch
         ? `/api/azure/work-item/${workItemDetailMatch[1]}`
+        : prDiscoverMatch
+          ? `/api/requests/${encodeURIComponent(prDiscoverMatch[1])}/pr-discover`
+          : prLinkMatch
+            ? `/api/requests/${encodeURIComponent(prLinkMatch[1])}/pr-link`
         : url.pathname === "/azure/iterations"
           ? "/api/azure/iterations"
           : "/api/azure/work-items";

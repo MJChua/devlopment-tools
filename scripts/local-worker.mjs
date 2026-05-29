@@ -153,10 +153,14 @@ async function executeRun(run) {
         }
       },
     );
+    const deliverySummary =
+      result.exitCode === 0
+        ? await finalizeTeamPrDelivery(run, runRepoPath, { setProgress })
+        : "";
     setProgress("Collecting diff summary", "Codex finished; collecting git diff.");
     await postJson(`/api/workers/runs/${run.runId}/heartbeat`, heartbeatBody());
     const diffSummary = await collectDiffSummary(runRepoPath);
-    const artifact = buildArtifact(run, result, diffSummary);
+    const artifact = buildArtifact(run, result, diffSummary, deliverySummary);
 
     await postJson(`/api/workers/runs/${run.runId}/complete`, {
       status: result.exitCode === 0 ? "completed" : "failed",
@@ -479,14 +483,31 @@ async function prepareExecutionRepository(run, repoPath, progress) {
     );
   }
 
-  const baseRef = await resolveWorktreeBaseRef(repoPath);
-  const branchName = `codex/${sanitizeBranchSegment(run.requestId)}`;
+  await ensureCleanGitWorktree(
+    repoPath,
+    "Cannot prepare the request branch because the selected repo has uncommitted changes. Commit, stash, or discard unrelated changes before rerunning Agent2.",
+  );
+  await runGitOrThrow("git fetch origin", repoPath, 120000);
+
+  const trace = getRunPrDeliveryTrace(run);
+  const branchName =
+    trace.sourceBranch || `codex/${sanitizeBranchSegment(run.requestId)}`;
+  if (autoCommitAndPr && !trace.sourceBranch) {
+    throw new Error(
+      "Cannot prepare the team PR branch because this draft PR request has no Azure Work Item number. Link an Azure Work Item so the worker can use feature/{id} or bug/{id}.",
+    );
+  }
+  const baseRef = await resolveWorktreeBaseRef(repoPath, Boolean(trace.sourceBranch));
   const worktreeRoot = path.join(path.dirname(repoPath), ".codex-request-worktrees");
   const worktreePath = path.join(worktreeRoot, sanitizePathSegment(run.requestId));
   await mkdir(worktreeRoot, { recursive: true });
 
   const existingWorktree = await findExistingWorktree(repoPath, worktreePath);
   if (existingWorktree) {
+    await ensureCleanGitWorktree(
+      existingWorktree,
+      "Cannot reuse the request worktree because it has uncommitted changes from an earlier run.",
+    );
     return { repoPath: existingWorktree };
   }
 
@@ -504,7 +525,22 @@ async function prepareExecutionRepository(run, repoPath, progress) {
   return { repoPath: worktreePath };
 }
 
-async function resolveWorktreeBaseRef(repoPath) {
+async function resolveWorktreeBaseRef(repoPath, requireDevelop = false) {
+  if (requireDevelop) {
+    const result = await runCommand(
+      "git rev-parse --verify origin/develop",
+      repoPath,
+      {},
+      15000,
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(
+        "Cannot prepare the formal PR branch because origin/develop was not found.",
+      );
+    }
+    return "origin/develop";
+  }
+
   for (const ref of ["origin/develop", "develop", "origin/main", "main", "HEAD"]) {
     const result = await runCommand(`git rev-parse --verify ${quote(ref)}`, repoPath, {}, 15000);
     if (result.exitCode === 0) {
@@ -537,6 +573,77 @@ async function findExistingWorktree(repoPath, worktreePath) {
     .map((line) => line.slice("worktree ".length).trim())
     .find((candidate) => path.resolve(candidate).toLowerCase() === normalizedTarget);
   return existing || "";
+}
+
+async function runGitOrThrow(command, cwd, timeoutMs = 120000) {
+  const result = await runCommand(command, cwd, {}, timeoutMs);
+  if (result.exitCode !== 0) {
+    throw new Error(`${command} failed: ${result.output.trim()}`);
+  }
+
+  return result;
+}
+
+async function ensureCleanGitWorktree(cwd, message) {
+  const status = await gitStatusPorcelain(cwd);
+  if (status.trim()) {
+    throw new Error(`${message}\n\nCurrent git status:\n${status.trim()}`);
+  }
+}
+
+async function gitStatusPorcelain(cwd) {
+  const result = await runCommand("git status --porcelain", cwd, {}, 30000);
+  if (result.exitCode !== 0) {
+    throw new Error(`git status failed: ${result.output.trim()}`);
+  }
+
+  return result.output;
+}
+
+function hasUnmergedStatus(status) {
+  return parseCommandOutputLines(status).some((line) =>
+    /^(DD|AU|UD|UA|DU|AA|UU|U | U)/.test(line),
+  );
+}
+
+function getRunPrDeliveryTrace(run) {
+  return {
+    baseBranch: getPacketHeaderValue(run.packet, "PR Delivery Base Branch") || "develop",
+    sourceBranch: normalizeOptionalPacketValue(
+      getPacketHeaderValue(run.packet, "PR Delivery Source Branch"),
+    ),
+    workItemId: normalizeOptionalPacketValue(
+      getPacketHeaderValue(run.packet, "PR Delivery Work Item"),
+    ),
+    branchKind: normalizeOptionalPacketValue(
+      getPacketHeaderValue(run.packet, "PR Delivery Branch Kind"),
+    ),
+  };
+}
+
+function getPacketHeaderValue(packet, label) {
+  const pattern = new RegExp(`^${escapeRegExp(label)}:\\s*(.+)$`, "im");
+  return packet?.match(pattern)?.[1]?.trim() || "";
+}
+
+function normalizeOptionalPacketValue(value) {
+  const trimmed = String(value || "").trim();
+  return trimmed.startsWith("(") ? "" : trimmed;
+}
+
+function buildTeamPrCommitMessage(run, trace) {
+  const requestKind = getPacketHeaderValue(run.packet, "Request kind").toUpperCase();
+  const summary =
+    getPacketHeaderValue(run.packet, "Interpretation Summary") ||
+    getPacketHeaderValue(run.packet, "Request ID") ||
+    "本次需求調整";
+  const verb = trace.branchKind === "bug" || requestKind === "BUG" ? "修正" : "調整";
+  const normalizedSummary = summary.replace(/\s+/g, " ").trim();
+  return `#${trace.workItemId} ${verb} ${normalizedSummary}`.slice(0, 120);
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function isDraftPrRun(run) {
@@ -681,19 +788,100 @@ function runInteractiveCommand(command, cwd) {
 }
 
 async function collectDiffSummary(cwd) {
-  const status = await runCommand("git status --short", cwd);
+  const status = await runCommand("git status --branch --short", cwd);
   const stat = await runCommand("git diff --stat", cwd);
+  const branchStat = await runCommand("git diff --stat origin/develop...HEAD", cwd);
+  const lastCommit = await runCommand("git log -1 --oneline --decorate", cwd);
 
   return [
-    "## git status --short",
+    "## git status --branch --short",
     status.output.trim() || "clean",
     "",
     "## git diff --stat",
     stat.output.trim() || "no diff",
+    "",
+    "## git diff --stat origin/develop...HEAD",
+    branchStat.exitCode === 0 ? branchStat.output.trim() || "no branch diff" : branchStat.output.trim(),
+    "",
+    "## latest commit",
+    lastCommit.output.trim() || "not available",
   ].join("\n");
 }
 
-function buildArtifact(run, result, diffSummary) {
+async function finalizeTeamPrDelivery(run, repoPath, progress) {
+  if (!autoCommitAndPr || run.agentRole !== "agent2" || !isDraftPrRun(run)) {
+    return "";
+  }
+
+  const trace = getRunPrDeliveryTrace(run);
+  if (!trace.sourceBranch) {
+    throw new Error(
+      "Cannot commit and push the PR branch because the Agent packet does not contain a feature/{id} or bug/{id} source branch.",
+    );
+  }
+
+  progress.setProgress(
+    "Preparing PR branch commit",
+    `Checking changes for ${trace.sourceBranch} before commit and push.`,
+  );
+  const status = await gitStatusPorcelain(repoPath);
+  if (!status.trim()) {
+    return `No local changes found to commit for ${trace.sourceBranch}.`;
+  }
+  if (hasUnmergedStatus(status)) {
+    throw new Error(
+      "Cannot commit and push because the request worktree has unresolved merge conflicts.",
+    );
+  }
+
+  await runGitOrThrow("git add -A", repoPath, 120000);
+  const staged = await runCommand("git diff --cached --quiet", repoPath, {}, 120000);
+  if (staged.exitCode === 0) {
+    return `No staged changes found to commit for ${trace.sourceBranch}.`;
+  }
+
+  const commitMessage = buildTeamPrCommitMessage(run, trace);
+  progress.setProgress(
+    "Committing PR branch",
+    `Creating commit on ${trace.sourceBranch}: ${commitMessage}`,
+  );
+  await runGitOrThrow(`git commit -m ${quote(commitMessage)}`, repoPath, 120000);
+
+  progress.setProgress(
+    "Pushing PR branch",
+    `Pushing ${trace.sourceBranch} to origin before merging origin/develop.`,
+  );
+  await runGitOrThrow(`git push -u origin ${quote(trace.sourceBranch)}`, repoPath, 120000);
+  await ensureCleanGitWorktree(
+    repoPath,
+    "Cannot merge origin/develop because the request branch is not clean after commit.",
+  );
+
+  progress.setProgress(
+    "Merging develop into request branch",
+    `Merging origin/develop into ${trace.sourceBranch}.`,
+  );
+  await runGitOrThrow("git fetch origin", repoPath, 120000);
+  await runGitOrThrow("git merge --no-edit origin/develop", repoPath, 120000);
+  await ensureCleanGitWorktree(
+    repoPath,
+    "Cannot finish PR branch preparation because the merge from origin/develop left local changes.",
+  );
+
+  progress.setProgress(
+    "Pushing updated PR branch",
+    `Pushing ${trace.sourceBranch} after merging origin/develop.`,
+  );
+  await runGitOrThrow(`git push origin ${quote(trace.sourceBranch)}`, repoPath, 120000);
+
+  return [
+    `Committed and pushed ${trace.sourceBranch}.`,
+    `Commit message: ${commitMessage}`,
+    "Merged origin/develop into the request branch and pushed again.",
+  ].join("\n");
+}
+
+function buildArtifact(run, result, diffSummary, deliverySummary = "") {
   const writePreference = autoCommitAndPr
     ? "Auto commit / draft PR preference is enabled for this worker. Azure and Git writes still must obey the control-plane guarded write policy."
     : "Auto commit / draft PR preference is disabled for this worker.";
@@ -712,9 +900,10 @@ function buildArtifact(run, result, diffSummary) {
     "## Notes",
     "",
     writePreference,
+    deliverySummary ? `\n## Team PR Delivery\n\n${deliverySummary}` : "",
     "",
     "Review the command output and diff before approving any Azure PR write.",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 function quote(value) {

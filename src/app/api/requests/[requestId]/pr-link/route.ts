@@ -5,6 +5,7 @@ import {
   getRequest,
   linkPullRequestToWorkflow,
 } from "@/lib/control-plane-db";
+import { getPrDeliveryTraceForRequest } from "@/lib/control-plane-workflow";
 import {
   parseAzureRequestBody,
   type AzureRequestBody,
@@ -74,10 +75,25 @@ export async function POST(
       );
     }
 
+    const trace = getPrDeliveryTraceForRequest(workflowRequest);
+    if (
+      trace.sourceBranch &&
+      (pullRequest.sourceBranch !== trace.sourceBranch ||
+        pullRequest.targetBranch !== trace.baseBranch)
+    ) {
+      return NextResponse.json(
+        {
+          error: `Azure PR #${pullRequestId} does not match this request branch. Expected ${trace.sourceBranch} -> ${trace.baseBranch}, got ${pullRequest.sourceBranch} -> ${pullRequest.targetBranch}.`,
+        },
+        { status: 400, headers: { "Cache-Control": "no-store" } },
+      );
+    }
+
     const link = linkPullRequestToWorkflow({
       requestId,
       pullRequestId: pullRequest.pullRequestId,
       webUrl: pullRequest.webUrl,
+      trace,
       actor: body.actor,
     });
 

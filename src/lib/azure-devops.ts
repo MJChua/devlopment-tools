@@ -564,6 +564,19 @@ export class AzureDevOpsClient {
     sourceBranch: string,
     targetBranch: string,
   ): Promise<PullRequestCreateResult | null> {
+    const pullRequests = await this.findActivePullRequestsForBranches(
+      sourceBranch,
+      targetBranch,
+      1,
+    );
+    return pullRequests[0] ?? null;
+  }
+
+  async findActivePullRequestsForBranches(
+    sourceBranch: string,
+    targetBranch: string,
+    top = 10,
+  ): Promise<PullRequestCreateResult[]> {
     const repository = await this.getRepository();
     const response = await this.request<AzureListResponse<AzurePullRequestRaw>>(
       `/${encodeURIComponent(this.project)}/_apis/git/repositories/${repository.id}/pullrequests`,
@@ -572,17 +585,12 @@ export class AzureDevOpsClient {
           "searchCriteria.status": "active",
           "searchCriteria.sourceRefName": toHeadRef(sourceBranch),
           "searchCriteria.targetRefName": toHeadRef(targetBranch),
-          "$top": "1",
+          "$top": String(Math.max(1, Math.min(Math.trunc(top), 25))),
         },
       },
     );
-    const pullRequest = response.value?.[0];
 
-    if (!pullRequest) {
-      return null;
-    }
-
-    return {
+    return (response.value ?? []).map((pullRequest) => ({
       pullRequestId: pullRequest.pullRequestId,
       title: pullRequest.title,
       status: pullRequest.status,
@@ -590,7 +598,7 @@ export class AzureDevOpsClient {
       targetBranch: normalizeBranchName(pullRequest.targetRefName),
       description: pullRequest.description ?? "",
       webUrl: this.getPullRequestWebUrl(pullRequest.pullRequestId),
-    };
+    }));
   }
 
   async updatePullRequestDescription(

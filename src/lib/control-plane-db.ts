@@ -12,6 +12,7 @@ import {
   getEffectiveBlockingRun,
   getMissingRequiredAgentHandoffFields,
   getNextAgentRole,
+  getPrDeliveryTraceForRequest,
   getPriorHandoffRunsForAgent,
   getStageAfterCompletedAgent,
   getStageForQueuedAgent,
@@ -20,11 +21,13 @@ import {
   isOpenWorkerRun,
   mergeStructuredAgentReport,
   normalizeAzureReferenceEvidence,
+  normalizePrDeliveryTrace,
   normalizeWorkflowResumeSnapshot,
   type AgentRole,
   type AuditEvent,
   type AzurePullRequestLink,
   type DeliveryMode,
+  type PrDeliveryTrace,
   type RequestAttachment,
   type RequestAttachmentPurpose,
   type RepositoryCandidate,
@@ -1562,10 +1565,48 @@ export function updateRequestStage(
     .run(status, now, requestId);
 }
 
+export function recordPullRequestDiscovery(input: {
+  requestId: string;
+  trace: Partial<PrDeliveryTrace>;
+  actor?: string;
+}) {
+  const request = getRequest(input.requestId);
+  if (!request) {
+    throw new Error("Request not found.");
+  }
+
+  validatePullRequestLinkTarget(request);
+
+  const trace =
+    normalizePrDeliveryTrace({
+      ...getPrDeliveryTraceForRequest(request),
+      ...(request.resumeSnapshot?.prDeliveryTrace ?? {}),
+      ...input.trace,
+    }) ?? getPrDeliveryTraceForRequest(request);
+  const now = new Date().toISOString();
+  updateRequestResumeSnapshot(
+    input.requestId,
+    buildSnapshotWithPrDeliveryTrace(request.resumeSnapshot, trace, now),
+    now,
+  );
+  appendAuditEvent(
+    input.requestId,
+    "azure.pr.discovery",
+    formatPullRequestDiscoveryMessage(trace),
+    {
+      actor: input.actor ?? "control-plane",
+      metadata: { trace },
+    },
+  );
+
+  return trace;
+}
+
 export function linkPullRequestToWorkflow(input: {
   requestId: string;
   pullRequestId: number;
   webUrl: string;
+  trace?: Partial<PrDeliveryTrace>;
   actor?: string;
 }) {
   const request = getRequest(input.requestId);
@@ -1588,6 +1629,16 @@ export function linkPullRequestToWorkflow(input: {
     if (request.status === "pr_ready") {
       updateRequestStage(input.requestId, "pr_created");
     }
+    recordPullRequestDiscovery({
+      requestId: input.requestId,
+      trace: {
+        ...input.trace,
+        discoveryStatus: "found",
+        pullRequestId: input.pullRequestId,
+        webUrl: input.webUrl,
+      },
+      actor: input.actor,
+    });
     return existingLink;
   }
 
@@ -1620,6 +1671,16 @@ export function linkPullRequestToWorkflow(input: {
   if (request.status === "pr_ready") {
     updateRequestStage(input.requestId, "pr_created");
   }
+  recordPullRequestDiscovery({
+    requestId: input.requestId,
+    trace: {
+      ...input.trace,
+      discoveryStatus: "found",
+      pullRequestId: input.pullRequestId,
+      webUrl: link.webUrl,
+    },
+    actor: input.actor,
+  });
   appendAuditEvent(
     input.requestId,
     "azure.pr.linked",
@@ -1781,6 +1842,54 @@ function updateRequestResumeSnapshot(
     .run(JSON.stringify(snapshot ?? {}), updatedAt, requestId);
 }
 
+function buildSnapshotWithPrDeliveryTrace(
+  current: WorkflowResumeSnapshot | null,
+  trace: PrDeliveryTrace,
+  updatedAt: string,
+): WorkflowResumeSnapshot {
+  const snapshot = normalizeWorkflowResumeSnapshot(current) ?? {
+    updatedAt: "",
+    updatedByRunId: "",
+    sourceAgentRole: null,
+    confirmedRequirements: [],
+    confirmedScope: [],
+    allowedFiles: [],
+    nonScope: [],
+    doNotTouch: [],
+    latestBlocker: "",
+    latestClarification: "",
+    verificationSummary: [],
+    executionRepoPath: "",
+    prDeliveryTrace: null,
+  };
+
+  return {
+    ...snapshot,
+    updatedAt,
+    prDeliveryTrace: trace,
+  };
+}
+
+function formatPullRequestDiscoveryMessage(trace: PrDeliveryTrace) {
+  if (trace.discoveryStatus === "found" && trace.pullRequestId) {
+    return `Azure PR #${trace.pullRequestId} found for ${trace.sourceBranch} -> ${trace.baseBranch}.`;
+  }
+
+  if (trace.discoveryStatus === "ambiguous") {
+    return `Multiple Azure PR candidates found for ${trace.sourceBranch} -> ${trace.baseBranch}.`;
+  }
+
+  if (trace.discoveryStatus === "not_found") {
+    return `No active Azure PR found for ${trace.sourceBranch} -> ${trace.baseBranch}.`;
+  }
+
+  if (trace.discoveryStatus === "failed") {
+    return trace.reason || "Azure PR discovery failed.";
+  }
+
+  return `Azure PR discovery pending for ${trace.sourceBranch || "request branch"} -> ${trace.baseBranch}.`;
+}
+
 function buildResumeSnapshotAfterRecovery(input: {
   current: WorkflowResumeSnapshot | null;
   run: WorkerRun;
@@ -1804,6 +1913,7 @@ function buildResumeSnapshotAfterRecovery(input: {
     verificationSummary: current?.verificationSummary ?? [],
     executionRepoPath:
       input.run.repoPath || current?.executionRepoPath || "",
+    prDeliveryTrace: current?.prDeliveryTrace ?? null,
   };
 
   return normalizeWorkflowResumeSnapshot(next);
