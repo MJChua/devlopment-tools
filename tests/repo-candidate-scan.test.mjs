@@ -55,6 +55,11 @@ test("repo candidate scan finds multi-app topbar/header hints for Agent1 packet"
   });
 
   assert(scan);
+  scan.apps[0].label = "mutated cache consumer";
+  const cachedScan = scanRepoCandidatesForAgent1(request);
+
+  assert(cachedScan);
+  assert.notEqual(cachedScan.apps[0].label, "mutated cache consumer");
   assert.match(packet, /Pre-Scanned Repo Candidates/);
   assert.match(packet, /apps\/admin-agent-web/);
   assert.match(packet, /AgentTopBar\.vue/);

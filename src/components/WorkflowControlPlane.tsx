@@ -71,6 +71,7 @@ import {
   type BlockerSummary,
 } from "@/lib/blocker-summary";
 import {
+  PACKET_SIZE_WARNING_CHARS,
   RUN_SOFT_TIMEOUT_MS,
   getNextAgentRole,
   type AzureReferenceEvidence,
@@ -4641,6 +4642,9 @@ function WorkflowStatusDashboard({
   const progressLabel = openRun?.progressLabel?.trim() ?? "";
   const progressDetail = openRun?.progressDetail?.trim() ?? "";
   const isPastSoftTimeout = openRun ? isRunPastSoftTimeout(openRun) : false;
+  const isPacketLarge = Boolean(
+    openRun && openRun.packetSizeChars > PACKET_SIZE_WARNING_CHARS,
+  );
 
   return (
     <div
@@ -4690,6 +4694,28 @@ function WorkflowStatusDashboard({
           {openRun?.progressUpdatedAt ? (
             <p className="mt-1 text-xs text-slate-500">
               進度更新：{formatTimestamp(openRun.progressUpdatedAt)}
+            </p>
+          ) : null}
+          {openRun ? (
+            <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              <MiniBadge label="Packet" value={formatPacketSize(openRun.packetSizeChars)} />
+              <MiniBadge
+                label="Handoff"
+                value={`${openRun.priorHandoffCount} 份`}
+              />
+              <MiniBadge
+                label="Snapshot"
+                value={openRun.usedResumeSnapshot ? "有" : "無"}
+              />
+              <MiniBadge
+                label="Retry"
+                value={openRun.isRetryContext ? "是" : "否"}
+              />
+            </div>
+          ) : null}
+          {isPacketLarge ? (
+            <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-900">
+              Packet 上下文偏大，可能增加 Agent 執行時間；系統已優先使用最新 handoff 與 snapshot 壓縮。
             </p>
           ) : null}
           {isPastSoftTimeout ? (
@@ -5581,6 +5607,18 @@ function isRunPastSoftTimeout(run: WorkerRunView) {
 
   const start = Date.parse(run.startedAt);
   return !Number.isNaN(start) && Date.now() - start > RUN_SOFT_TIMEOUT_MS;
+}
+
+function formatPacketSize(value: number) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "未知";
+  }
+
+  if (value < 1000) {
+    return `${value} chars`;
+  }
+
+  return `${(value / 1000).toFixed(1)}k chars`;
 }
 
 function formatTimestamp(value?: string | null) {

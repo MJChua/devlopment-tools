@@ -10,6 +10,10 @@ import type {
 const MAX_APPS = 12;
 const MAX_SURFACES = 24;
 const MAX_FILES_PER_APP = 350;
+const scanCache = new Map<
+  string,
+  { revision: string; scan: RepoCandidateScan | null }
+>();
 const SKIP_DIRS = new Set([
   ".git",
   ".next",
@@ -29,16 +33,97 @@ export function scanRepoCandidatesForAgent1(
     return null;
   }
 
+  const cacheKey = path.resolve(rootPath).toLowerCase();
+  const revision = getRepoScanRevision(rootPath);
+  const cached = scanCache.get(cacheKey);
+  if (cached?.revision === revision) {
+    return cloneScan(cached.scan);
+  }
+
   const warnings: string[] = [];
   const apps = scanApps(rootPath, warnings);
   const surfaces = apps.flatMap((app) => scanSurfaces(rootPath, app, warnings));
 
-  return {
+  const scan = {
     rootPath,
     apps: apps.slice(0, MAX_APPS),
     surfaces: surfaces.slice(0, MAX_SURFACES),
     warnings,
   };
+  scanCache.set(cacheKey, { revision, scan });
+  return cloneScan(scan);
+}
+
+function getRepoScanRevision(rootPath: string) {
+  const gitRevision = readGitRevision(rootPath);
+  const appsMtime = readMtime(path.join(rootPath, "apps"));
+  return `${gitRevision || "no-git"}|apps:${appsMtime}`;
+}
+
+function readGitRevision(rootPath: string) {
+  const gitPath = path.join(rootPath, ".git");
+  const gitDir = resolveGitDir(rootPath, gitPath);
+  if (!gitDir) {
+    return "";
+  }
+
+  try {
+    const headPath = path.join(gitDir, "HEAD");
+    const head = readFileSync(headPath, "utf8").trim();
+    if (!head.startsWith("ref:")) {
+      return `${head}|${readMtime(headPath)}`;
+    }
+
+    const refPath = path.join(gitDir, head.slice("ref:".length).trim());
+    return `${head}|${readFileSync(refPath, "utf8").trim()}|${readMtime(refPath)}`;
+  } catch {
+    return `git-dir:${readMtime(gitDir)}`;
+  }
+}
+
+function resolveGitDir(rootPath: string, gitPath: string) {
+  if (!existsSync(gitPath)) {
+    return "";
+  }
+
+  try {
+    const stat = statSync(gitPath);
+    if (stat.isDirectory()) {
+      return gitPath;
+    }
+
+    const content = readFileSync(gitPath, "utf8").trim();
+    const match = content.match(/^gitdir:\s*(.+)$/i);
+    if (!match) {
+      return "";
+    }
+
+    const gitDir = match[1].trim();
+    return path.isAbsolute(gitDir)
+      ? gitDir
+      : path.resolve(rootPath, gitDir);
+  } catch {
+    return "";
+  }
+}
+
+function readMtime(targetPath: string) {
+  try {
+    return String(Math.round(statSync(targetPath).mtimeMs));
+  } catch {
+    return "0";
+  }
+}
+
+function cloneScan(scan: RepoCandidateScan | null) {
+  return scan
+    ? {
+        rootPath: scan.rootPath,
+        apps: scan.apps.map((entry) => ({ ...entry })),
+        surfaces: scan.surfaces.map((entry) => ({ ...entry })),
+        warnings: [...scan.warnings],
+      }
+    : null;
 }
 
 function scanApps(rootPath: string, warnings: string[]): RepoCandidateScanEntry[] {

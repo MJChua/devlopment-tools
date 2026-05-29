@@ -88,6 +88,103 @@ test("workflow packet is role-specific and keeps implementation packet lean", ()
   assert.doesNotMatch(packet, /Delivery Report/);
 });
 
+test("workflow packet keeps only latest effective handoff per agent", () => {
+  const request = sampleRequest();
+  const oldAgent1 = sampleRun({
+    runId: "agent1-old",
+    agentRole: "agent1",
+    status: "completed",
+    artifact: [
+      "# Source Check Report",
+      "",
+      "## Confirmed Requirements",
+      "- old requirement",
+      "",
+      "## Confirmed Scope",
+      "- old scope",
+      "",
+      "## Allowed Files",
+      "- apps/old/OldTopBar.vue",
+      "",
+      "## Non-Scope",
+      "- none",
+      "",
+      "## Do Not Touch",
+      "- none",
+      "",
+      "## Can Proceed",
+      "yes",
+      "",
+      "## Task Package For Agent2",
+      "- old package",
+    ].join("\n"),
+    completedAt: "2026-05-25T06:31:00.000Z",
+  });
+  const retriedAgent1 = sampleRun({
+    runId: "agent1-new",
+    retryOfRunId: oldAgent1.runId,
+    agentRole: "agent1",
+    status: "completed",
+    artifact: [
+      "# Source Check Report",
+      "",
+      "## Confirmed Requirements",
+      "- new requirement",
+      "",
+      "## Confirmed Scope",
+      "- new scope",
+      "",
+      "## Allowed Files",
+      "- apps/new/NewTopBar.vue",
+      "",
+      "## Non-Scope",
+      "- none",
+      "",
+      "## Do Not Touch",
+      "- none",
+      "",
+      "## Can Proceed",
+      "yes",
+      "",
+      "## Task Package For Agent2",
+      "- new package",
+    ].join("\n"),
+    completedAt: "2026-05-25T06:35:00.000Z",
+  });
+  const packet = buildWorkflowAgentPacket(request, "agent2", [
+    oldAgent1,
+    retriedAgent1,
+  ]);
+
+  assert.match(packet, /apps\/new\/NewTopBar\.vue/);
+  assert.doesNotMatch(packet, /apps\/old\/OldTopBar\.vue/);
+  assert.doesNotMatch(packet, /old requirement/);
+});
+
+test("resume snapshot does not replace missing required handoff", () => {
+  const request = sampleRequest({
+    resumeSnapshot: {
+      updatedAt: "2026-05-25T06:35:00.000Z",
+      updatedByRunId: "agent1-new",
+      sourceAgentRole: "agent1",
+      confirmedRequirements: ["Add MJ to topbar."],
+      confirmedScope: ["Topbar UI only."],
+      allowedFiles: ["apps/admin-agent-web/src/components/AgentTopBar.vue"],
+      nonScope: ["No API changes."],
+      doNotTouch: ["packages/**"],
+      latestBlocker: "",
+      latestClarification: "",
+      verificationSummary: [],
+      executionRepoPath: "C:\\workspace\\repo",
+    },
+  });
+  const packet = buildWorkflowAgentPacket(request, "agent2", []);
+
+  assert.match(packet, /## Request Resume Snapshot/);
+  assert.match(packet, /does not replace required Agent handoff contracts/);
+  assert.match(packet, /No relevant prior handoff summary/);
+});
+
 test("Level 1 packets prefer scoped verification and Agent3 trusts Agent2 evidence", () => {
   const request = sampleRequest({ taskLevel: "Level 1" });
   const agent1Run = sampleRun({
@@ -706,6 +803,13 @@ function sampleRun(overrides = {}) {
     diffSummary: "",
     artifact: "",
     error: "",
+    progressLabel: "",
+    progressDetail: "",
+    progressUpdatedAt: null,
+    packetSizeChars: 0,
+    priorHandoffCount: 0,
+    usedResumeSnapshot: false,
+    isRetryContext: false,
     createdAt: "2026-05-25T06:30:00.000Z",
     startedAt: null,
     completedAt: null,

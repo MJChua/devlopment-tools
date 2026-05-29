@@ -5,18 +5,22 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   buildWorkflowAgentPacket,
+  buildResumeSnapshotAfterRun,
   createWorkflowRequestFromInput,
   evaluateWorkflowStageGate,
   getAgentHandoffBlocker,
   getEffectiveBlockingRun,
   getMissingRequiredAgentHandoffFields,
   getNextAgentRole,
+  getPriorHandoffRunsForAgent,
   getStageAfterCompletedAgent,
   getStageForQueuedAgent,
   isHandoffSchemaRun,
+  isEmptyResumeSnapshot,
   isOpenWorkerRun,
   mergeStructuredAgentReport,
   normalizeAzureReferenceEvidence,
+  normalizeWorkflowResumeSnapshot,
   type AgentRole,
   type AuditEvent,
   type AzurePullRequestLink,
@@ -33,6 +37,7 @@ import {
   type WorkflowRequest,
   type WorkflowRequestDetail,
   type WorkflowRequestInput,
+  type WorkflowResumeSnapshot,
   type WorkflowStage,
 } from "./control-plane-workflow.ts";
 import {
@@ -150,9 +155,10 @@ export function createRequest(input: WorkflowRequestInput) {
       azure_reference_id,
       azure_reference_json,
       analysis_json,
+      resume_snapshot_json,
       created_at,
       updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     request.requestId,
     request.kind,
@@ -170,6 +176,7 @@ export function createRequest(input: WorkflowRequestInput) {
     request.azureReferenceId,
     JSON.stringify(request.azureReferenceEvidence),
     JSON.stringify(request.interpretation),
+    JSON.stringify(request.resumeSnapshot ?? {}),
     request.createdAt,
     request.updatedAt,
   );
@@ -683,6 +690,15 @@ export function dispatchNextAgent(input: {
     requestRepoPath: repoPath,
     runs: detail.runs,
   });
+  const repoCandidateScan =
+    agentRole === "agent1"
+      ? scanRepoCandidatesForAgent1({ ...requestSnapshot, repoPath })
+      : null;
+  const usedResumeSnapshot = !isEmptyResumeSnapshot(request.resumeSnapshot);
+  const priorHandoffCount = getPriorHandoffRunsForAgent(
+    agentRole,
+    detail.runs,
+  ).length;
   const packet = appendRecoveryContextToPacket(
     buildWorkflowAgentPacket(
       { ...requestSnapshot, repoPath: repoPathForRun },
@@ -690,10 +706,8 @@ export function dispatchNextAgent(input: {
       detail.runs,
       detail.attachments,
       {
-        repoCandidateScan:
-          agentRole === "agent1"
-            ? scanRepoCandidatesForAgent1({ ...requestSnapshot, repoPath })
-            : null,
+        repoCandidateScan,
+        resumeSnapshot: request.resumeSnapshot,
       },
     ),
     {
@@ -705,6 +719,8 @@ export function dispatchNextAgent(input: {
     },
   );
   const nextStage = getStageForQueuedAgent(agentRole);
+  const packetSizeChars = packet.length;
+  const isRetryContext = Boolean(retryOfRunId || dispatchReason !== "normal");
 
   getDatabase()
     .prepare(
@@ -722,11 +738,15 @@ export function dispatchNextAgent(input: {
         diff_summary,
         artifact,
         error,
+        packet_size_chars,
+        prior_handoff_count,
+        used_resume_snapshot,
+        is_retry_context,
         created_at,
         started_at,
         completed_at,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, '', '', '', '', ?, NULL, NULL, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, '', '', '', '', ?, ?, ?, ?, ?, NULL, NULL, ?)`,
     )
     .run(
       runId,
@@ -737,6 +757,10 @@ export function dispatchNextAgent(input: {
       retryOfRunId,
       dispatchReason,
       packet,
+      packetSizeChars,
+      priorHandoffCount,
+      usedResumeSnapshot ? 1 : 0,
+      isRetryContext ? 1 : 0,
       now,
       now,
     );
@@ -834,6 +858,16 @@ export function recoverWorkflowRequest(input: RecoverWorkflowRequestInput) {
     recoveryAttachments,
     actor: input.actor ?? "control-plane",
   });
+  updateRequestResumeSnapshot(
+    detail.request.requestId,
+    buildResumeSnapshotAfterRecovery({
+      current: detail.request.resumeSnapshot,
+      run,
+      blockedRun,
+      recoveryNote,
+      updatedAt: new Date().toISOString(),
+    }),
+  );
 
   appendAuditEvent(
     detail.request.requestId,
@@ -921,6 +955,18 @@ function reconcileWorkerRunOutput(input: {
         )
       : "blocked";
   updateRequestStage(input.detail.request.requestId, nextStage);
+  updateRequestResumeSnapshot(
+    input.detail.request.requestId,
+    buildResumeSnapshotAfterRun({
+      current: input.detail.request.resumeSnapshot,
+      run,
+      status: nextStatus,
+      artifact: mergedArtifact,
+      error: handoffBlocker,
+      updatedAt: now,
+    }),
+    now,
+  );
   appendAuditEvent(
     input.detail.request.requestId,
     "agent.output_synchronized",
@@ -1393,6 +1439,20 @@ export function completeWorkerRun(
           )
       : "blocked";
   updateRequestStage(run.requestId, nextStage);
+  if (request) {
+    updateRequestResumeSnapshot(
+      run.requestId,
+      buildResumeSnapshotAfterRun({
+        current: request.resumeSnapshot,
+        run,
+        status,
+        artifact,
+        error,
+        updatedAt: now,
+      }),
+      now,
+    );
+  }
   markWorkerSeen(workerId);
   appendAuditEvent(
     run.requestId,
@@ -1707,6 +1767,48 @@ function updateRequestUpdatedAt(requestId: string, updatedAt = new Date().toISOS
     .run(updatedAt, requestId);
 }
 
+function updateRequestResumeSnapshot(
+  requestId: string,
+  snapshot: WorkflowResumeSnapshot | null,
+  updatedAt = new Date().toISOString(),
+) {
+  getDatabase()
+    .prepare(
+      `UPDATE workflow_requests
+       SET resume_snapshot_json = ?, updated_at = ?
+       WHERE request_id = ?`,
+    )
+    .run(JSON.stringify(snapshot ?? {}), updatedAt, requestId);
+}
+
+function buildResumeSnapshotAfterRecovery(input: {
+  current: WorkflowResumeSnapshot | null;
+  run: WorkerRun;
+  blockedRun: WorkerRun;
+  recoveryNote: string;
+  updatedAt: string;
+}): WorkflowResumeSnapshot | null {
+  const current = normalizeWorkflowResumeSnapshot(input.current);
+  const next: WorkflowResumeSnapshot = {
+    updatedAt: input.updatedAt,
+    updatedByRunId: input.run.runId,
+    sourceAgentRole: input.run.agentRole,
+    confirmedRequirements: current?.confirmedRequirements ?? [],
+    confirmedScope: current?.confirmedScope ?? [],
+    allowedFiles: current?.allowedFiles ?? [],
+    nonScope: current?.nonScope ?? [],
+    doNotTouch: current?.doNotTouch ?? [],
+    latestBlocker: input.blockedRun.error || current?.latestBlocker || "",
+    latestClarification:
+      input.recoveryNote || current?.latestClarification || "",
+    verificationSummary: current?.verificationSummary ?? [],
+    executionRepoPath:
+      input.run.repoPath || current?.executionRepoPath || "",
+  };
+
+  return normalizeWorkflowResumeSnapshot(next);
+}
+
 function requireWorker(workerId: string): WorkerRegistration {
   const row = getDatabase()
     .prepare(`SELECT * FROM workers WHERE worker_id = ?`)
@@ -1768,6 +1870,7 @@ function getDatabase() {
       azure_reference_id TEXT NOT NULL,
       azure_reference_json TEXT NOT NULL DEFAULT '{}',
       analysis_json TEXT NOT NULL DEFAULT '{}',
+      resume_snapshot_json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -1811,6 +1914,10 @@ function getDatabase() {
       progress_label TEXT NOT NULL DEFAULT '',
       progress_detail TEXT NOT NULL DEFAULT '',
       progress_updated_at TEXT,
+      packet_size_chars INTEGER NOT NULL DEFAULT 0,
+      prior_handoff_count INTEGER NOT NULL DEFAULT 0,
+      used_resume_snapshot INTEGER NOT NULL DEFAULT 0,
+      is_retry_context INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       started_at TEXT,
       completed_at TEXT,
@@ -1956,11 +2063,16 @@ function getDatabase() {
   ensureColumn(database, "workers", "codex_checked_at", "TEXT");
   ensureColumn(database, "workers", "readiness_check_requested_at", "TEXT");
   ensureColumn(database, "workers", "codex_setup_requested_at", "TEXT");
+  ensureColumn(database, "workflow_requests", "resume_snapshot_json", "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(database, "worker_runs", "repo_path", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, "worker_runs", "retry_of_run_id", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, "worker_runs", "progress_label", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, "worker_runs", "progress_detail", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, "worker_runs", "progress_updated_at", "TEXT");
+  ensureColumn(database, "worker_runs", "packet_size_chars", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "worker_runs", "prior_handoff_count", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "worker_runs", "used_resume_snapshot", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "worker_runs", "is_retry_context", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(
     database,
     "worker_runs",
@@ -2003,9 +2115,22 @@ function mapRequestRow(row: unknown): WorkflowRequest {
       value.azure_reference_id,
     ),
     interpretation: parseInterpretation(value.analysis_json, value.detail),
+    resumeSnapshot: parseResumeSnapshot(value.resume_snapshot_json),
     createdAt: value.created_at,
     updatedAt: value.updated_at,
   };
+}
+
+function parseResumeSnapshot(value: unknown) {
+  if (typeof value === "string" && value.trim()) {
+    try {
+      return normalizeWorkflowResumeSnapshot(JSON.parse(value));
+    } catch {
+      return null;
+    }
+  }
+
+  return normalizeWorkflowResumeSnapshot(value);
 }
 
 function parseInterpretation(value: unknown, detail: string) {
@@ -2253,6 +2378,10 @@ function mapRunRow(row: unknown): WorkerRun {
     progressUpdatedAt: value.progress_updated_at
       ? String(value.progress_updated_at)
       : null,
+    packetSizeChars: Number(value.packet_size_chars ?? 0),
+    priorHandoffCount: Number(value.prior_handoff_count ?? 0),
+    usedResumeSnapshot: Number(value.used_resume_snapshot ?? 0) === 1,
+    isRetryContext: Number(value.is_retry_context ?? 0) === 1,
     createdAt: String(value.created_at),
     startedAt: value.started_at ? String(value.started_at) : null,
     completedAt: value.completed_at ? String(value.completed_at) : null,

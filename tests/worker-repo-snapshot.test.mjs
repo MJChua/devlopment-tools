@@ -292,6 +292,7 @@ test("Agent3 uses Agent2 execution repo path when worker reports a request workt
   updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
 
   const request = createRequest({
+    title: `Resume snapshot ${randomUUID()}`,
     detail: "Add UI copy.",
     assignedWorkerId: worker.workerId,
     repoPath,
@@ -337,6 +338,158 @@ test("Agent3 uses Agent2 execution repo path when worker reports a request workt
   const agent3 = getRun(getRequestDetail(request.requestId), "agent3");
   assert.equal(agent3.repoPath, worktreePath);
   assert.match(agent3.packet, new RegExp(escapeRegExp(worktreePath)));
+});
+
+test("request resume snapshot and packet pressure metadata persist across dispatch", async () => {
+  const {
+    completeWorkerRun,
+    createRequest,
+    dispatchNextAgent,
+    getRequestDetail,
+    registerWorker,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+
+  const worker = registerWorker({
+    workerId: `worker-resume-snapshot-${randomUUID()}`,
+    displayName: "Resume Snapshot Worker",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = "C:\\workspace\\repo-resume-snapshot";
+
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "repo-resume-snapshot", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+
+  const request = createRequest({
+    detail: "Add UI copy.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+  });
+  const agent0 = dispatchNextAgent({ requestId: request.requestId });
+  completeAndAssertNext({
+    completeWorkerRun,
+    getRequestDetail,
+    requestId: request.requestId,
+    worker,
+    runId: agent0.runId,
+    completedAgent: "agent0",
+    nextAgent: "agent1",
+  });
+  const agent1 = getRun(getRequestDetail(request.requestId), "agent1");
+  completeAndAssertNext({
+    completeWorkerRun,
+    getRequestDetail,
+    requestId: request.requestId,
+    worker,
+    runId: agent1.runId,
+    completedAgent: "agent1",
+    nextAgent: "agent2",
+  });
+
+  const detail = getRequestDetail(request.requestId);
+  const agent2 = getRun(detail, "agent2");
+
+  assert.deepEqual(detail.request.resumeSnapshot.allowedFiles, ["src/**", "tests/**"]);
+  assert.match(detail.request.resumeSnapshot.latestBlocker, /^$/);
+  assert.equal(detail.request.resumeSnapshot.executionRepoPath, repoPath);
+  assert(agent2.packetSizeChars > 0);
+  assert.equal(agent2.priorHandoffCount, 1);
+  assert.equal(agent2.usedResumeSnapshot, true);
+  assert.equal(agent2.isRetryContext, false);
+  assert.match(agent2.packet, /## Request Resume Snapshot/);
+});
+
+test("clarification retry updates snapshot and only reruns the blocked agent context", async () => {
+  const {
+    completeWorkerRun,
+    createRequest,
+    dispatchNextAgent,
+    getRequestDetail,
+    recoverWorkflowRequest,
+    registerWorker,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+
+  const worker = registerWorker({
+    workerId: `worker-retry-snapshot-${randomUUID()}`,
+    displayName: "Retry Snapshot Worker",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = "C:\\workspace\\repo-retry-snapshot";
+
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "repo-retry-snapshot", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+
+  const request = createRequest({
+    title: `Retry snapshot ${randomUUID()}`,
+    detail: "Add MJ to the top menu bar.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+  });
+  const agent0 = dispatchNextAgent({ requestId: request.requestId });
+  completeWorkerRun(worker.workerId, worker.token, agent0.runId, {
+    status: "completed",
+    commandOutput: "ok",
+    diffSummary: "clean",
+    artifact: "# Agent0",
+  });
+  const agent1 = getRun(getRequestDetail(request.requestId), "agent1");
+  completeWorkerRun(worker.workerId, worker.token, agent1.runId, {
+    status: "blocked",
+    commandOutput: "blocked",
+    diffSummary: "clean",
+    artifact: "# Source Check Report\n\n## Can Proceed\nno",
+    error: "Need to know whether admin-agent or admin-hq is the target.",
+  });
+
+  const retry = recoverWorkflowRequest({
+    requestId: request.requestId,
+    action: "clarify_and_retry",
+    runId: agent1.runId,
+    clarification: "Use admin-agent.",
+  });
+  const detail = getRequestDetail(request.requestId);
+  const retryRun = detail.runs.find((run) => run.runId === retry.runId);
+
+  assert.equal(detail.request.resumeSnapshot.latestClarification, "Use admin-agent.");
+  assert.match(
+    detail.request.resumeSnapshot.latestBlocker,
+    /admin-agent or admin-hq/,
+  );
+  assert.equal(retryRun.agentRole, "agent1");
+  assert.equal(retryRun.isRetryContext, true);
+  assert.match(retryRun.packet, /## Recovery Context/);
+  assert.match(retryRun.packet, /Operator clarification:\nUse admin-agent\./);
+  assert.doesNotMatch(retryRun.packet, /Implementation Result/);
+  assert.doesNotMatch(retryRun.packet, /Delivery Report/);
 });
 
 test("incomplete Agent1 handoff auto-repairs once and recovery reruns same Agent", async () => {

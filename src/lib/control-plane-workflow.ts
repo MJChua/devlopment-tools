@@ -108,8 +108,23 @@ export type RepoCandidateScan = {
   surfaces: RepoCandidateScanEntry[];
   warnings: string[];
 };
+export type WorkflowResumeSnapshot = {
+  updatedAt: string;
+  updatedByRunId: string;
+  sourceAgentRole: AgentRole | null;
+  confirmedRequirements: string[];
+  confirmedScope: string[];
+  allowedFiles: string[];
+  nonScope: string[];
+  doNotTouch: string[];
+  latestBlocker: string;
+  latestClarification: string;
+  verificationSummary: string[];
+  executionRepoPath: string;
+};
 export type WorkflowAgentPacketContext = {
   repoCandidateScan?: RepoCandidateScan | null;
+  resumeSnapshot?: WorkflowResumeSnapshot | null;
 };
 
 export type WorkflowRequestInput = {
@@ -154,6 +169,7 @@ export type WorkflowRequest = Required<
   templateId: RequestInputTemplateId;
   azureReferenceEvidence: AzureReferenceEvidence;
   interpretation: RequestInterpretation;
+  resumeSnapshot: WorkflowResumeSnapshot | null;
   requestId: string;
   status: WorkflowStage;
   createdAt: string;
@@ -216,6 +232,10 @@ export type WorkerRun = {
   progressLabel: string;
   progressDetail: string;
   progressUpdatedAt: string | null;
+  packetSizeChars: number;
+  priorHandoffCount: number;
+  usedResumeSnapshot: boolean;
+  isRetryContext: boolean;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -279,6 +299,7 @@ export type StageGateResult = {
 
 export const RUN_HEARTBEAT_STALE_MS = 10 * 60 * 1000;
 export const RUN_SOFT_TIMEOUT_MS = 5 * 60 * 1000;
+export const PACKET_SIZE_WARNING_CHARS = 24_000;
 
 const HANDOFF_SECTION_MAX_CHARS = 900;
 const HANDOFF_FALLBACK_MAX_CHARS = 1200;
@@ -422,6 +443,7 @@ export function createWorkflowRequestFromInput(
     azureReferenceId,
     azureReferenceEvidence,
     interpretation,
+    resumeSnapshot: null,
     requestId: createRequestId(kind, title, createdAt),
     status: "intake",
     createdAt: now,
@@ -494,6 +516,10 @@ export function buildWorkflowAgentPacket(
   attachments: RequestAttachment[] = [],
   context: WorkflowAgentPacketContext = {},
 ) {
+  const effectiveContext: WorkflowAgentPacketContext = {
+    ...context,
+    resumeSnapshot: context.resumeSnapshot ?? request.resumeSnapshot,
+  };
   const sections = [
     `# ${formatAgentRole(agentRole)} Packet`,
     "",
@@ -510,7 +536,9 @@ export function buildWorkflowAgentPacket(
     "If information is missing, conflicting, or out of scope, stop and report it.",
     "```",
     "",
-    ...buildPacketBody(request, agentRole, runs, attachments, context),
+    ...buildResumeSnapshotSection(effectiveContext.resumeSnapshot),
+    "",
+    ...buildPacketBody(request, agentRole, runs, attachments, effectiveContext),
   ];
 
   return sections.join("\n");
@@ -983,19 +1011,116 @@ function buildPriorArtifactsSection(
   runs: WorkerRun[],
   agentRoles: AgentRole[],
 ) {
-  const artifacts = runs
-    .filter(
-      (run) =>
-        agentRoles.includes(run.agentRole) &&
-        run.status === "completed" &&
-        run.artifact.trim(),
-    )
-    .map(buildPriorHandoffSummary);
+  const artifacts = getEffectivePriorHandoffRuns(runs, agentRoles).map(
+    buildPriorHandoffSummary,
+  );
 
   return [
     "## Prior Handoff Summary",
     "",
     artifacts.join("\n\n") || "No relevant prior handoff summary.",
+  ];
+}
+
+export function getPriorHandoffRunsForAgent(
+  agentRole: AgentRole,
+  runs: WorkerRun[],
+) {
+  if (agentRole === "agent1") {
+    return getEffectivePriorHandoffRuns(runs, ["agent0"]);
+  }
+
+  if (agentRole === "agent2") {
+    return getEffectivePriorHandoffRuns(runs, ["agent1"]);
+  }
+
+  if (agentRole === "agent3") {
+    return getEffectivePriorHandoffRuns(runs, ["agent1", "agent2"]);
+  }
+
+  return [];
+}
+
+function getEffectivePriorHandoffRuns(
+  runs: WorkerRun[],
+  agentRoles: AgentRole[],
+) {
+  const supersededRunIds = new Set(
+    runs
+      .map((run) => run.retryOfRunId)
+      .filter((runId): runId is string => Boolean(runId)),
+  );
+  const selected = new Map<AgentRole, WorkerRun>();
+
+  for (const run of [...runs].reverse()) {
+    if (!agentRoles.includes(run.agentRole)) {
+      continue;
+    }
+
+    if (selected.has(run.agentRole)) {
+      continue;
+    }
+
+    if (
+      run.status === "completed" &&
+      run.artifact.trim() &&
+      !supersededRunIds.has(run.runId)
+    ) {
+      selected.set(run.agentRole, run);
+    }
+  }
+
+  return agentRoles
+    .map((agentRole) => selected.get(agentRole))
+    .filter((run): run is WorkerRun => Boolean(run));
+}
+
+function buildResumeSnapshotSection(
+  snapshot: WorkflowResumeSnapshot | null | undefined,
+) {
+  if (!snapshot || isEmptyResumeSnapshot(snapshot)) {
+    return [];
+  }
+
+  return [
+    "## Request Resume Snapshot",
+    "",
+    "- Server-maintained compact continuation state for this request.",
+    "- Use it as orientation only; it does not replace required Agent handoff contracts below.",
+    `- Updated At: ${snapshot.updatedAt || "unknown"}`,
+    snapshot.updatedByRunId
+      ? `- Updated By Run: ${snapshot.updatedByRunId}`
+      : "- Updated By Run: unknown",
+    snapshot.sourceAgentRole
+      ? `- Source Agent: ${formatAgentRole(snapshot.sourceAgentRole)}`
+      : "- Source Agent: none",
+    snapshot.executionRepoPath
+      ? `- Execution Repo / Worktree: ${snapshot.executionRepoPath}`
+      : "- Execution Repo / Worktree: not recorded",
+    "",
+    "### Confirmed Requirements",
+    ...formatListOrNone(snapshot.confirmedRequirements),
+    "",
+    "### Confirmed Scope",
+    ...formatListOrNone(snapshot.confirmedScope),
+    "",
+    "### Allowed Files",
+    ...formatListOrNone(snapshot.allowedFiles),
+    "",
+    "### Non-Scope",
+    ...formatListOrNone(snapshot.nonScope),
+    "",
+    "### Do Not Touch",
+    ...formatListOrNone(snapshot.doNotTouch),
+    "",
+    "### Verification Summary",
+    ...formatListOrNone(snapshot.verificationSummary),
+    "",
+    "### Latest Blocker",
+    snapshot.latestBlocker ? `- ${snapshot.latestBlocker}` : "- none",
+    "",
+    "### Latest Clarification",
+    snapshot.latestClarification ? `- ${snapshot.latestClarification}` : "- none",
   ];
 }
 
@@ -1107,6 +1232,147 @@ function getAgent3DeliveryBlocker(
   }
 
   return "";
+}
+
+export function normalizeWorkflowResumeSnapshot(
+  value: unknown,
+): WorkflowResumeSnapshot | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const input = value as Partial<WorkflowResumeSnapshot>;
+  const snapshot: WorkflowResumeSnapshot = {
+    updatedAt: requireOptionalTrimmed(input.updatedAt),
+    updatedByRunId: requireOptionalTrimmed(input.updatedByRunId),
+    sourceAgentRole: isAgentRole(input.sourceAgentRole)
+      ? input.sourceAgentRole
+      : null,
+    confirmedRequirements: normalizeSnapshotList(input.confirmedRequirements),
+    confirmedScope: normalizeSnapshotList(input.confirmedScope),
+    allowedFiles: normalizeSnapshotList(input.allowedFiles),
+    nonScope: normalizeSnapshotList(input.nonScope),
+    doNotTouch: normalizeSnapshotList(input.doNotTouch),
+    latestBlocker: requireOptionalTrimmed(input.latestBlocker),
+    latestClarification: requireOptionalTrimmed(input.latestClarification),
+    verificationSummary: normalizeSnapshotList(input.verificationSummary),
+    executionRepoPath: requireOptionalTrimmed(input.executionRepoPath),
+  };
+
+  return isEmptyResumeSnapshot(snapshot) ? null : snapshot;
+}
+
+export function isEmptyResumeSnapshot(
+  snapshot: WorkflowResumeSnapshot | null | undefined,
+) {
+  if (!snapshot) {
+    return true;
+  }
+
+  return (
+    snapshot.confirmedRequirements.length === 0 &&
+    snapshot.confirmedScope.length === 0 &&
+    snapshot.allowedFiles.length === 0 &&
+    snapshot.nonScope.length === 0 &&
+    snapshot.doNotTouch.length === 0 &&
+    snapshot.verificationSummary.length === 0 &&
+    !snapshot.latestBlocker &&
+    !snapshot.latestClarification &&
+    !snapshot.executionRepoPath
+  );
+}
+
+export function buildResumeSnapshotAfterRun(input: {
+  current: WorkflowResumeSnapshot | null | undefined;
+  run: Pick<WorkerRun, "runId" | "agentRole" | "repoPath">;
+  status: Exclude<WorkerRunStatus, "queued" | "running">;
+  artifact: string;
+  error: string;
+  updatedAt: string;
+}) {
+  const sections = extractHandoffSections(input.artifact);
+  const next = normalizeWorkflowResumeSnapshot(input.current) ?? emptyResumeSnapshot();
+
+  next.updatedAt = input.updatedAt;
+  next.updatedByRunId = input.run.runId;
+  next.sourceAgentRole = input.run.agentRole;
+  next.executionRepoPath = input.run.repoPath || next.executionRepoPath;
+  next.latestBlocker =
+    input.status === "completed"
+      ? ""
+      : input.error || summarizeBlockingSections(sections);
+
+  if (input.run.agentRole === "agent1") {
+    next.confirmedRequirements = snapshotSectionList(
+      sections,
+      "Confirmed Requirements",
+    );
+    next.confirmedScope = snapshotSectionList(sections, "Confirmed Scope");
+    next.allowedFiles = snapshotSectionList(sections, "Allowed Files");
+    next.nonScope = snapshotSectionList(sections, "Non-Scope");
+    next.doNotTouch = snapshotSectionList(sections, "Do Not Touch");
+  }
+
+  if (input.run.agentRole === "agent2" || input.run.agentRole === "agent3") {
+    next.verificationSummary = normalizeSnapshotList([
+      ...snapshotSectionList(sections, "Commands Run"),
+      ...snapshotSectionList(sections, "Verification Result"),
+      ...snapshotSectionList(sections, "Review Result"),
+    ]);
+  }
+
+  return isEmptyResumeSnapshot(next) ? null : next;
+}
+
+function emptyResumeSnapshot(): WorkflowResumeSnapshot {
+  return {
+    updatedAt: "",
+    updatedByRunId: "",
+    sourceAgentRole: null,
+    confirmedRequirements: [],
+    confirmedScope: [],
+    allowedFiles: [],
+    nonScope: [],
+    doNotTouch: [],
+    latestBlocker: "",
+    latestClarification: "",
+    verificationSummary: [],
+    executionRepoPath: "",
+  };
+}
+
+function isAgentRole(value: unknown): value is AgentRole {
+  return typeof value === "string" && AGENT_ROLES.includes(value as AgentRole);
+}
+
+function normalizeSnapshotList(value: unknown) {
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .flatMap((item) => String(item ?? "").split(/\r?\n/))
+    .map((item) => item.replace(/^[-*]\s+/, "").trim())
+    .filter(Boolean)
+    .filter((item) => !/^none\.?$/i.test(item))
+    .slice(0, 24);
+}
+
+function snapshotSectionList(
+  sections: Array<{ heading: string; content: string }>,
+  heading: string,
+) {
+  return normalizeSnapshotList(getHandoffSectionContent(sections, heading));
+}
+
+function summarizeBlockingSections(
+  sections: Array<{ heading: string; content: string }>,
+) {
+  return (
+    getHandoffSectionContent(sections, "Blocking Questions") ||
+    getHandoffSectionContent(sections, "Review Result") ||
+    getHandoffSectionContent(sections, "Blockers")
+  )
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 900);
 }
 
 export function extractClarificationPromptFromArtifact(
