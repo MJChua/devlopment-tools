@@ -1,0 +1,1526 @@
+import {
+  createRequestId,
+  type AzureReferenceType,
+  type RequestKind,
+  type TaskLevel,
+} from "./request-intake.ts";
+import {
+  analyzeNaturalLanguageRequest,
+  normalizeRequestInterpretation,
+  type RequestInterpretation,
+} from "./request-analysis.ts";
+import {
+  normalizeRequestInputTemplateId,
+  type RequestInputTemplateId,
+} from "./request-templates.ts";
+
+export const WORKFLOW_STAGES = [
+  "intake",
+  "dispatched",
+  "source_check",
+  "ready_for_implementation",
+  "running",
+  "review",
+  "pr_ready",
+  "pr_created",
+  "delivered",
+  "blocked",
+] as const;
+
+export const AGENT_ROLES = ["agent0", "agent1", "agent2", "agent3"] as const;
+export const WORKER_RUN_STATUSES = [
+  "queued",
+  "running",
+  "completed",
+  "failed",
+  "blocked",
+] as const;
+export const WORKER_RUN_DISPATCH_REASONS = [
+  "normal",
+  "auto_repair",
+  "manual_retry",
+  "clarification_retry",
+] as const;
+export const DELIVERY_MODES = ["draft_pr", "no_pr"] as const;
+export const REQUEST_EVIDENCE_MODES = ["standard", "ui_only"] as const;
+export const REQUEST_ATTACHMENT_PURPOSES = ["intake", "clarification"] as const;
+
+export type WorkflowStage = (typeof WORKFLOW_STAGES)[number];
+export type AgentRole = (typeof AGENT_ROLES)[number];
+export type WorkerRunStatus = (typeof WORKER_RUN_STATUSES)[number];
+export type WorkerRunDispatchReason =
+  (typeof WORKER_RUN_DISPATCH_REASONS)[number];
+export type DeliveryMode = (typeof DELIVERY_MODES)[number];
+export type RequestEvidenceMode = (typeof REQUEST_EVIDENCE_MODES)[number];
+export type RequestAttachmentPurpose =
+  (typeof REQUEST_ATTACHMENT_PURPOSES)[number];
+export type AzureReferenceEvidenceStatus =
+  | "none"
+  | "tracking"
+  | "verified"
+  | "unverified";
+export type AzureReferenceEvidence = {
+  status: AzureReferenceEvidenceStatus;
+  referenceType: AzureReferenceType;
+  referenceId: string;
+  checkedAt: string;
+  title: string;
+  workItemType: string;
+  workItemState: string;
+  assignedTo: string;
+  areaPath: string;
+  iterationPath: string;
+  webUrl: string;
+  summary: string;
+  error: string;
+};
+export type StageGateRecoveryKind =
+  | "none"
+  | "handoff_schema"
+  | "agent_failed"
+  | "agent_blocked"
+  | "stale_run"
+  | "human_decision";
+
+export type WorkflowRequestInput = {
+  kind?: RequestKind;
+  title?: string;
+  detail: string;
+  taskLevel?: TaskLevel;
+  owner?: string;
+  assignedWorkerId: string;
+  repoPath?: string;
+  deliveryMode?: DeliveryMode;
+  evidenceMode?: RequestEvidenceMode;
+  templateId?: RequestInputTemplateId;
+  azureReferenceType: AzureReferenceType;
+  azureReferenceId: string;
+  azureReferenceEvidence?: Partial<AzureReferenceEvidence>;
+  interpretation?: RequestInterpretation;
+};
+
+export type WorkflowRequest = Required<
+  Omit<
+    WorkflowRequestInput,
+    | "kind"
+    | "title"
+    | "taskLevel"
+    | "owner"
+    | "repoPath"
+    | "deliveryMode"
+    | "evidenceMode"
+    | "templateId"
+    | "azureReferenceEvidence"
+    | "interpretation"
+  >
+> & {
+  kind: RequestKind;
+  title: string;
+  taskLevel: TaskLevel;
+  owner: string;
+  repoPath: string;
+  deliveryMode: DeliveryMode;
+  evidenceMode: RequestEvidenceMode;
+  templateId: RequestInputTemplateId;
+  azureReferenceEvidence: AzureReferenceEvidence;
+  interpretation: RequestInterpretation;
+  requestId: string;
+  status: WorkflowStage;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkerRegistration = {
+  workerId: string;
+  displayName: string;
+  repoPath: string;
+  commandTemplate: string;
+  autoCommitAndPr: boolean;
+  sandboxMode: "workspace-write" | "danger-full-access";
+  codexReady: boolean;
+  codexStatus: "unknown" | "ready" | "missing-command" | "command-failed";
+  codexError: string;
+  codexDiagnosticCode:
+    | "unknown"
+    | "ready"
+    | "missing-command"
+    | "cli-missing"
+    | "desktop-internal-not-cli"
+    | "cli-command-failed";
+  codexExecutablePath: string;
+  codexCheckedAt: string | null;
+  readinessCheckRequestedAt: string | null;
+  codexSetupRequestedAt: string | null;
+  repositoryCandidates: RepositoryCandidate[];
+  repositoryCandidatesUpdatedAt: string | null;
+  status: "registered" | "active" | "disabled";
+  lastSeenAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RepositoryCandidate = {
+  name: string;
+  path: string;
+  source: string;
+};
+
+export type WorkerRegistrationWithToken = WorkerRegistration & {
+  token: string;
+};
+
+export type WorkerRun = {
+  runId: string;
+  requestId: string;
+  agentRole: AgentRole;
+  workerId: string;
+  repoPath: string;
+  status: WorkerRunStatus;
+  retryOfRunId: string;
+  dispatchReason: WorkerRunDispatchReason;
+  packet: string;
+  commandOutput: string;
+  diffSummary: string;
+  artifact: string;
+  error: string;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+};
+
+export type AuditEvent = {
+  id: string;
+  requestId: string;
+  eventType: string;
+  message: string;
+  actor: string;
+  metadata: string;
+  createdAt: string;
+};
+
+export type AzurePullRequestLink = {
+  id: string;
+  requestId: string;
+  pullRequestId: number;
+  webUrl: string;
+  createdAt: string;
+};
+
+export type RequestAttachment = {
+  attachmentId: string;
+  requestId: string;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+  storagePath: string;
+  purpose: RequestAttachmentPurpose;
+  recoveryOfRunId: string;
+  actor: string;
+  createdAt: string;
+};
+
+export type WorkflowRequestDetail = {
+  request: WorkflowRequest;
+  runs: WorkerRun[];
+  prLinks: AzurePullRequestLink[];
+  auditEvents: AuditEvent[];
+  attachments: RequestAttachment[];
+};
+
+export type StageGateResult = {
+  status: "ready" | "blocked" | "waiting" | "human-decision";
+  label: string;
+  summary: string;
+  blockers: string[];
+  nextActions: string[];
+  humanDecisions: string[];
+  blockedRunId: string;
+  blockedAgentRole: AgentRole | null;
+  recoveryKind: StageGateRecoveryKind;
+  canAutoRepair: boolean;
+  canManualRetry: boolean;
+  needsClarification: boolean;
+};
+
+export const RUN_HEARTBEAT_STALE_MS = 10 * 60 * 1000;
+
+const HANDOFF_SECTION_MAX_CHARS = 900;
+const HANDOFF_FALLBACK_MAX_CHARS = 1200;
+const HANDOFF_TOTAL_MAX_CHARS = 3600;
+const HANDOFF_SECTION_HEADINGS = [
+  "Confirmed Requirements",
+  "Confirmed Scope",
+  "Allowed Files",
+  "File Scope",
+  "Non-Scope",
+  "Do Not Touch",
+  "Blocking Questions",
+  "Can Proceed",
+  "Task Package",
+  "Implementation Result",
+  "Changed Files",
+  "Commands Run",
+  "Verification Result",
+  "Scope Compliance",
+  "Human Decisions",
+  "Blockers",
+] as const;
+const REQUIRED_HANDOFF_FIELDS: Partial<Record<AgentRole, string[]>> = {
+  agent1: [
+    "Confirmed Requirements",
+    "Confirmed Scope",
+    "Allowed Files",
+    "Non-Scope",
+    "Do Not Touch",
+    "Can Proceed",
+    "Task Package",
+  ],
+  agent2: [
+    "Changed Files",
+    "Commands Run",
+    "Verification Result",
+    "Scope Compliance",
+    "Human Decisions",
+  ],
+};
+const AGENT_REPORT_TITLES: Partial<Record<AgentRole, string[]>> = {
+  agent1: ["Source Check Report"],
+  agent2: ["Implementation Result"],
+  agent3: ["Delivery Report"],
+};
+
+export function normalizeWorkflowRequestInput(
+  input: Partial<WorkflowRequestInput>,
+): WorkflowRequestInput {
+  const detail = requireTrimmed(input.detail, "detail");
+  const azureReferenceType = normalizeAzureReferenceType(
+    input.azureReferenceType,
+  );
+  const azureReferenceId =
+    azureReferenceType === "none" ? "" : (input.azureReferenceId ?? "").trim();
+  const interpretation =
+    input.interpretation
+      ? normalizeRequestInterpretation(input.interpretation, {
+          fallbackDetail: detail,
+        })
+      : analyzeNaturalLanguageRequest(detail, {
+          fallbackTitle: input.title,
+        });
+
+  return {
+    kind: normalizeRequestKind(input.kind ?? interpretation.kind),
+    title: requireOptionalTrimmed(input.title) || interpretation.title,
+    detail,
+    taskLevel: normalizeTaskLevel(input.taskLevel ?? interpretation.taskLevel),
+    owner: requireOptionalTrimmed(input.owner) || "local-user",
+    assignedWorkerId: (input.assignedWorkerId ?? "").trim(),
+    repoPath: requireOptionalTrimmed(input.repoPath),
+    deliveryMode: normalizeDeliveryMode(input.deliveryMode),
+    evidenceMode: normalizeEvidenceMode(input.evidenceMode),
+    templateId: normalizeRequestInputTemplateId(input.templateId),
+    azureReferenceType,
+    azureReferenceId,
+    azureReferenceEvidence: normalizeAzureReferenceEvidence(
+      input.azureReferenceEvidence,
+      azureReferenceType,
+      azureReferenceId,
+    ),
+    interpretation,
+  };
+}
+
+export function createWorkflowRequestFromInput(
+  input: WorkflowRequestInput,
+  createdAt = new Date(),
+): WorkflowRequest {
+  const now = createdAt.toISOString();
+  const interpretation =
+    input.interpretation
+      ? normalizeRequestInterpretation(input.interpretation, {
+          fallbackDetail: input.detail,
+        })
+      : analyzeNaturalLanguageRequest(input.detail, {
+          fallbackTitle: input.title,
+        });
+  const kind = normalizeRequestKind(input.kind ?? interpretation.kind);
+  const title = requireOptionalTrimmed(input.title) || interpretation.title;
+  const taskLevel = normalizeTaskLevel(input.taskLevel ?? interpretation.taskLevel);
+  const owner = requireOptionalTrimmed(input.owner) || "local-user";
+  const repoPath = requireOptionalTrimmed(input.repoPath);
+  const deliveryMode = normalizeDeliveryMode(input.deliveryMode);
+  const evidenceMode = normalizeEvidenceMode(input.evidenceMode);
+  const templateId = normalizeRequestInputTemplateId(input.templateId);
+  const azureReferenceType = normalizeAzureReferenceType(input.azureReferenceType);
+  const azureReferenceId =
+    azureReferenceType === "none" ? "" : (input.azureReferenceId ?? "").trim();
+  const azureReferenceEvidence = normalizeAzureReferenceEvidence(
+    input.azureReferenceEvidence,
+    azureReferenceType,
+    azureReferenceId,
+  );
+
+  return {
+    ...input,
+    kind,
+    title,
+    taskLevel,
+    owner,
+    repoPath,
+    deliveryMode,
+    evidenceMode,
+    templateId,
+    azureReferenceType,
+    azureReferenceId,
+    azureReferenceEvidence,
+    interpretation,
+    requestId: createRequestId(kind, title, createdAt),
+    status: "intake",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function getNextAgentRole(
+  request: WorkflowRequest,
+  runs: WorkerRun[] = [],
+): AgentRole | null {
+  if (hasOpenRun(runs)) {
+    return null;
+  }
+
+  switch (request.status) {
+    case "intake":
+      return "agent0";
+    case "dispatched":
+    case "source_check":
+      return "agent1";
+    case "ready_for_implementation":
+      return "agent2";
+    case "review":
+      return "agent3";
+    default:
+      return null;
+  }
+}
+
+export function getStageForQueuedAgent(agentRole: AgentRole): WorkflowStage {
+  if (agentRole === "agent0") {
+    return "dispatched";
+  }
+
+  if (agentRole === "agent1") {
+    return "source_check";
+  }
+
+  if (agentRole === "agent2") {
+    return "running";
+  }
+
+  return "review";
+}
+
+export function getStageAfterCompletedAgent(
+  agentRole: AgentRole,
+  deliveryMode: DeliveryMode = "draft_pr",
+): WorkflowStage {
+  if (agentRole === "agent0") {
+    return "source_check";
+  }
+
+  if (agentRole === "agent1") {
+    return "ready_for_implementation";
+  }
+
+  if (agentRole === "agent2") {
+    return "review";
+  }
+
+  return deliveryMode === "no_pr" ? "delivered" : "pr_ready";
+}
+
+export function buildWorkflowAgentPacket(
+  request: WorkflowRequest,
+  agentRole: AgentRole,
+  runs: WorkerRun[] = [],
+  attachments: RequestAttachment[] = [],
+) {
+  const sections = [
+    `# ${formatAgentRole(agentRole)} Packet`,
+    "",
+    ...buildPacketHeader(request, agentRole),
+    "",
+    "## Startup Prompt",
+    "",
+    "```text",
+    `You are operating on Request ID: ${request.requestId}.`,
+    `You are ${formatAgentRole(agentRole)}.`,
+    "Use only this packet, prior handoff artifacts, and confirmed sources.",
+    "Do not use unrelated previous request context.",
+    getAgentResponsibility(agentRole),
+    "If information is missing, conflicting, or out of scope, stop and report it.",
+    "```",
+    "",
+    ...buildPacketBody(request, agentRole, runs, attachments),
+  ];
+
+  return sections.join("\n");
+}
+
+function buildPacketHeader(request: WorkflowRequest, agentRole: AgentRole) {
+  const lines = [
+    `Request ID: ${request.requestId}`,
+    `Request kind: ${request.kind}`,
+    `Task Level: ${request.taskLevel}`,
+    `Recommended Agent: ${formatAgentRole(agentRole)}`,
+    `Delivery Mode: ${formatDeliveryMode(request.deliveryMode)}`,
+    `Evidence Mode: ${formatEvidenceMode(request.evidenceMode)}`,
+    `Input Template: ${request.templateId}`,
+    `Azure Reference: ${formatWorkflowAzureReference(request)}`,
+  ];
+
+  if (agentRole === "agent0" || agentRole === "agent1") {
+    lines.push(`Interpretation Source: ${request.interpretation.source}`);
+    lines.push(`Interpretation Summary: ${request.interpretation.summary}`);
+  }
+
+  if (agentRole === "agent1") {
+    lines.push("Source strictness: contextual");
+  }
+
+  return lines;
+}
+
+function buildPacketBody(
+  request: WorkflowRequest,
+  agentRole: AgentRole,
+  runs: WorkerRun[],
+  attachments: RequestAttachment[],
+) {
+  if (agentRole === "agent0") {
+    return buildAgent0PacketBody(request, attachments);
+  }
+
+  if (agentRole === "agent1") {
+    return buildAgent1PacketBody(request, runs, attachments);
+  }
+
+  if (agentRole === "agent2") {
+    return buildAgent2PacketBody(request, runs);
+  }
+
+  return buildAgent3PacketBody(request, runs);
+}
+
+function buildAgent0PacketBody(
+  request: WorkflowRequest,
+  attachments: RequestAttachment[],
+) {
+  return [
+    "## User Request",
+    "",
+    request.detail,
+    "",
+    ...buildUserAttachmentsSection(attachments, request.evidenceMode),
+    "",
+    ...buildAzureReferenceEvidenceSection(request),
+    "",
+    ...buildVisualEvidenceModeSection(request),
+    "",
+    "## Output",
+    "",
+    "Return the next Agent startup prompt and the machine-readable interpretation block below.",
+    "",
+    WORKER_INTERPRETATION_OUTPUT_TEMPLATE,
+    "",
+    "## Rules",
+    "",
+    request.evidenceMode === "ui_only"
+      ? "- User text and screenshots are limited visual evidence only; do not expand them into API, permission, data-model, persistence, or business-rule requirements."
+      : "- User request is intake evidence only.",
+    "- Do not confirm Spec, API, Figma, QA, or implementation scope.",
+    "- Do not write Azure or local repository state.",
+  ];
+}
+
+function buildAgent1PacketBody(
+  request: WorkflowRequest,
+  runs: WorkerRun[],
+  attachments: RequestAttachment[],
+) {
+  return [
+    ...buildPriorArtifactsSection(runs, ["agent0"]),
+    "",
+    "## User Request",
+    "",
+    request.detail,
+    "",
+    ...buildUserAttachmentsSection(attachments, request.evidenceMode),
+    "",
+    ...buildAzureReferenceEvidenceSection(request),
+    "",
+    ...buildVisualEvidenceModeSection(request),
+    "",
+    "## Source Signals To Confirm",
+    "",
+    ...formatListOrNone(request.interpretation.missingSources),
+    "",
+    "## Intake Warnings",
+    "",
+    ...formatListOrNone(request.interpretation.sourceWarnings),
+    "",
+    "## Output",
+    "",
+    "Return a Source Check Report using this exact compact schema:",
+    "",
+    "```markdown",
+    "# Source Check Report",
+    "## Confirmed Requirements",
+    "- List only requirements verified from confirmed sources.",
+    "## Confirmed Scope",
+    "- List the behavior or code areas that are in scope.",
+    "## Allowed Files",
+    "- List file paths or path patterns Agent2 may add, delete, or modify.",
+    "## Non-Scope",
+    "- List related work that must not be included.",
+    "## Do Not Touch",
+    "- List protected files, shared modules, env/config, generated files, or unknown areas.",
+    "## Blocking Questions",
+    "- List missing or conflicting source evidence; use '- none' only when verified.",
+    "## Can Proceed",
+    "yes/no",
+    "## Task Package For Agent2",
+    "- If Can Proceed is yes, provide the minimum implementation steps, verification commands, and file boundaries.",
+    "- If Can Proceed is no, write 'blocked' and explain the blocker.",
+    "```",
+    "",
+    "## Rules",
+    "",
+    request.evidenceMode === "ui_only"
+      ? "- User text and screenshots can be sufficient limited visual evidence when they define the target surface, expected visual result, and allowed visual scope."
+      : "- User request is intake evidence only.",
+    ...(request.evidenceMode === "ui_only"
+      ? [
+          "- Do not block solely for missing Figma, Swagger, or a formal spec for copy, color, spacing, placement, or simple visual state changes.",
+          "- Block only for unclear API fields, permissions, data source, role mapping, business rules, persistence, cross-screen workflow, or scope expansion; ask the smallest necessary clarification.",
+        ]
+      : []),
+    "- Stop on missing critical source, source conflict, or scope expansion.",
+    "- Do not invent requirements, API fields, UI behavior, QA criteria, or implementation scope.",
+  ];
+}
+
+function buildUserAttachmentsSection(
+  attachments: RequestAttachment[],
+  evidenceMode: RequestEvidenceMode,
+) {
+  const intakeAttachments = attachments.filter(
+    (attachment) => attachment.purpose === "intake",
+  );
+
+  if (intakeAttachments.length === 0) {
+    return [
+      "## User Attachments",
+      "",
+      "- none",
+    ];
+  }
+
+  return [
+    "## User Attachments",
+    "",
+    evidenceMode === "ui_only"
+      ? "- These files are limited visual evidence for UI-only copy, color, spacing, placement, and simple visual states. They do not confirm API, permissions, data model, persistence, or business rules."
+      : "- These files are intake evidence only. They do not confirm Spec, API, Figma, QA, or implementation scope.",
+    ...intakeAttachments.map(
+      (attachment) =>
+        `- ${attachment.filename} (${attachment.contentType}, ${attachment.sizeBytes} bytes): ${attachment.storagePath}`,
+    ),
+  ];
+}
+
+function buildAzureReferenceEvidenceSection(request: WorkflowRequest) {
+  if (
+    request.azureReferenceType === "none" ||
+    !request.azureReferenceId.trim()
+  ) {
+    return [
+      "## Azure Reference Status",
+      "",
+      "- none",
+    ];
+  }
+
+  const evidence = normalizeAzureReferenceEvidence(
+    request.azureReferenceEvidence,
+    request.azureReferenceType,
+    request.azureReferenceId,
+  );
+
+  if (
+    request.azureReferenceType === "work-item" &&
+    evidence.status === "verified"
+  ) {
+    return [
+      "## Verified Azure Work Item Evidence",
+      "",
+      "- Status: verified from Azure Work Item read before dispatch.",
+      `- Work Item: #${evidence.referenceId}`,
+      evidence.title ? `- Title: ${evidence.title}` : "- Title: not provided",
+      evidence.workItemType
+        ? `- Type: ${evidence.workItemType}`
+        : "- Type: not provided",
+      evidence.workItemState
+        ? `- State: ${evidence.workItemState}`
+        : "- State: not provided",
+      evidence.assignedTo
+        ? `- Assigned To: ${evidence.assignedTo}`
+        : "- Assigned To: not provided",
+      evidence.iterationPath
+        ? `- Iteration Path: ${evidence.iterationPath}`
+        : "- Iteration Path: not provided",
+      evidence.webUrl ? `- URL: ${evidence.webUrl}` : "- URL: not provided",
+      evidence.checkedAt
+        ? `- Checked At: ${evidence.checkedAt}`
+        : "- Checked At: not provided",
+      "",
+      "Evidence rule: use this snapshot only for fields explicitly present above; it does not confirm unstated UI, API, permission, or business-rule behavior.",
+    ];
+  }
+
+  const statusLabel =
+    evidence.status === "unverified"
+      ? "Unverified reference"
+      : "Tracking reference only";
+
+  return [
+    "## Azure Reference Status",
+    "",
+    `- Status: ${statusLabel}.`,
+    `- Reference: ${formatWorkflowAzureReference(request)}`,
+    evidence.error ? `- Read error: ${evidence.error}` : "",
+    "- Rule: do not treat this ID as a confirmed source until the App provides Verified Azure Work Item Evidence.",
+  ].filter(Boolean);
+}
+
+function buildVisualEvidenceModeSection(request: WorkflowRequest) {
+  if (request.evidenceMode !== "ui_only") {
+    return [];
+  }
+
+  return [
+    "## UI-only Visual Evidence Mode",
+    "",
+    "- This request is marked as a small UI / visual correction.",
+    "- User text and screenshots may confirm copy, color, spacing, placement, and simple visual state expectations.",
+    "- This mode does not confirm API behavior, permissions, data model, persistence, business rules, analytics, or cross-screen workflow changes.",
+    "- Keep Agent2 scope limited to UI files and focused tests unless verified sources explicitly expand it.",
+  ];
+}
+
+function buildAgent2PacketBody(
+  request: WorkflowRequest,
+  runs: WorkerRun[],
+) {
+  const hasSourceCheck = hasCompletedArtifact(runs, "agent1");
+
+  return [
+    ...buildPriorArtifactsSection(runs, ["agent1"]),
+    "",
+    ...(hasSourceCheck
+      ? []
+      : [
+          "## Fallback User Request",
+          "",
+          request.detail,
+          "",
+          "User request is intake evidence only; stop if Source Check Report is missing or incomplete.",
+          "",
+    ]),
+    "## Output",
+    "",
+    "Return an Implementation Result using this exact compact schema:",
+    "",
+    "```markdown",
+    "# Implementation Result",
+    "## Changed Files",
+    "- List each changed file and why it was in the allowed scope.",
+    "## Commands Run",
+    "- List verification commands and outcomes.",
+    "## Verification Result",
+    "- pass/fail/not-run with reason.",
+    "## Scope Compliance",
+    "- Confirm no file was added, deleted, or modified outside Agent1's allowed files; otherwise mark blocked.",
+    "## Human Decisions",
+    "- List any required human approval or '- none'.",
+    "```",
+    "",
+    "## Delivery Mode",
+    "",
+    formatDeliveryModeGuidance(request.deliveryMode),
+    "",
+    "## Rules",
+    "",
+    "- Implement only confirmed scope from Source Check Report / Task Package; do not add, delete, or modify files outside that scope.",
+    "- Stop before env changes, package installation, deployment, file deletion, large refactor, or shared core module modification.",
+    "- Azure writes require human approval in the control plane.",
+  ];
+}
+
+function buildAgent3PacketBody(
+  request: WorkflowRequest,
+  runs: WorkerRun[],
+) {
+  const hasReviewInputs =
+    hasCompletedArtifact(runs, "agent1") && hasCompletedArtifact(runs, "agent2");
+
+  return [
+    ...buildPriorArtifactsSection(runs, ["agent1", "agent2"]),
+    "",
+    ...(hasReviewInputs
+      ? []
+      : [
+          "## Fallback User Request",
+          "",
+          request.detail,
+          "",
+          "User request is intake evidence only; stop if Source Check Report or Implementation Result is missing.",
+          "",
+    ]),
+    "## Output",
+    "",
+    "Return a Delivery Report using this exact compact schema:",
+    "",
+    "```markdown",
+    "# Delivery Report",
+    "## Review Result",
+    "- pass/fail/block with reason.",
+    "## Scope Compliance",
+    "- Confirm Agent2 stayed within Agent1's allowed files and non-scope.",
+    "## Unapproved Changes",
+    "- List unapproved file creation, deletion, unrelated modification, or '- none'.",
+    "## Verification Result",
+    "- Commands reviewed and outcome.",
+    "## Regression Risk",
+    "- Risk summary and missing tests.",
+    "## Human Decisions",
+    "- Required approvals or '- none'.",
+    "```",
+    "",
+    "## Delivery Mode",
+    "",
+    formatDeliveryModeGuidance(request.deliveryMode),
+    "",
+    "## Rules",
+    "",
+    "- Review against confirmed sources, scope, implementation result, diff, and verification evidence.",
+    "- Flag unapproved file creation, file deletion, unrelated modification, or scope expansion as blockers.",
+    "- Do not justify out-of-scope changes or mark provisional checks as QA-confirmed.",
+    "- Merge PR, abandon PR, branch policy, build trigger, deploy, and Work Item field mutation are out of MVP scope.",
+  ];
+}
+
+function buildPriorArtifactsSection(
+  runs: WorkerRun[],
+  agentRoles: AgentRole[],
+) {
+  const artifacts = runs
+    .filter(
+      (run) =>
+        agentRoles.includes(run.agentRole) &&
+        run.status === "completed" &&
+        run.artifact.trim(),
+    )
+    .map(buildPriorHandoffSummary);
+
+  return [
+    "## Prior Handoff Summary",
+    "",
+    artifacts.join("\n\n") || "No relevant prior handoff summary.",
+  ];
+}
+
+function buildPriorHandoffSummary(run: WorkerRun) {
+  const artifact = run.artifact.trim();
+  const title = extractArtifactTitle(artifact);
+  const sections = extractHandoffSections(artifact);
+  const missingRequiredFields = getMissingRequiredHandoffFieldsForSections(
+    run.agentRole,
+    sections,
+  );
+  const lines = [
+    `### ${formatAgentRole(run.agentRole)} Handoff Summary (${run.completedAt ?? run.updatedAt})`,
+    `Source run: ${run.runId}`,
+    `Artifact size: ${artifact.length} chars; package includes compact handoff fields only.`,
+  ];
+
+  if (title) {
+    lines.push(`Artifact title: ${title}`);
+  }
+
+  if (sections.length > 0) {
+    if (missingRequiredFields.length > 0) {
+      lines.push(
+        "",
+        `Missing required handoff fields: ${missingRequiredFields.join(", ")}. Treat this handoff as incomplete and stop before implementation or delivery if those fields are needed.`,
+      );
+    }
+    lines.push("", ...formatHandoffSections(sections));
+  } else {
+    lines.push(
+      "",
+      "Structured handoff fields were not found; treat this as incomplete and stop if required scope evidence is missing.",
+      "",
+      clipHandoffText(artifact, HANDOFF_FALLBACK_MAX_CHARS),
+    );
+  }
+
+  return clipHandoffText(lines.join("\n"), HANDOFF_TOTAL_MAX_CHARS);
+}
+
+export function getMissingRequiredAgentHandoffFields(
+  agentRole: AgentRole,
+  artifact: string,
+) {
+  const requiredFields = REQUIRED_HANDOFF_FIELDS[agentRole] ?? [];
+  if (requiredFields.length === 0) {
+    return [];
+  }
+
+  return getMissingRequiredHandoffFieldsForSections(
+    agentRole,
+    extractHandoffSections(artifact.trim()),
+  );
+}
+
+export function getAgentHandoffBlocker(
+  agentRole: AgentRole,
+  artifact: string,
+) {
+  if (agentRole !== "agent1") {
+    return "";
+  }
+
+  const sections = extractHandoffSections(artifact.trim());
+  const canProceed = getHandoffSectionContent(sections, "Can Proceed");
+  if (!canProceed || /^yes\b/i.test(canProceed.trim())) {
+    return "";
+  }
+
+  const summary = [
+    getHandoffSectionContent(sections, "Blocking Questions"),
+    getHandoffSectionContent(sections, "Task Package"),
+  ]
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .join("\n");
+
+  return `Agent1 source check cannot proceed: ${clipHandoffText(summary || canProceed, 900)}`;
+}
+
+export function mergeStructuredAgentReport(
+  agentRole: AgentRole,
+  artifact: string,
+  commandOutput: string,
+) {
+  const normalizedArtifact = artifact.trim();
+  const report = extractStructuredAgentReport(agentRole, commandOutput);
+  if (!report) {
+    return normalizedArtifact;
+  }
+
+  if (normalizedArtifact.includes(report)) {
+    return normalizedArtifact;
+  }
+
+  if (!normalizedArtifact) {
+    return report;
+  }
+
+  return [
+    report,
+    "",
+    "## Worker Execution Summary",
+    "",
+    normalizedArtifact,
+  ].join("\n");
+}
+
+export function extractStructuredAgentReport(
+  agentRole: AgentRole,
+  text: string,
+) {
+  const titles = AGENT_REPORT_TITLES[agentRole] ?? [];
+  if (titles.length === 0 || !text.trim()) {
+    return "";
+  }
+
+  const titleSet = new Set(titles.map(normalizeHandoffHeading));
+  const matches = [...text.matchAll(/^#\s+(.+?)\s*$/gm)].filter((match) =>
+    titleSet.has(normalizeHandoffHeading(match[1] ?? "")),
+  );
+  const match = matches.at(-1);
+  if (!match || match.index === undefined) {
+    return "";
+  }
+
+  const nextTopLevelHeading = text
+    .slice(match.index + match[0].length)
+    .search(/^#\s+.+?\s*$/m);
+  const end =
+    nextTopLevelHeading >= 0
+      ? match.index + match[0].length + nextTopLevelHeading
+      : text.length;
+
+  return text.slice(match.index, end).trim();
+}
+
+function extractArtifactTitle(artifact: string) {
+  const match = artifact.match(/^#\s+(.+?)\s*$/m);
+  return match?.[1]?.trim() ?? "";
+}
+
+function extractHandoffSections(artifact: string) {
+  const headingMatches = [...artifact.matchAll(/^#{2,6}\s+(.+?)\s*$/gm)];
+  const sections: Array<{ heading: string; content: string }> = [];
+
+  for (let index = 0; index < headingMatches.length; index += 1) {
+    const match = headingMatches[index];
+    const heading = match[1]?.trim() ?? "";
+    if (!isHandoffHeading(heading)) {
+      continue;
+    }
+
+    const contentStart = (match.index ?? 0) + match[0].length;
+    const nextMatch = headingMatches[index + 1];
+    const contentEnd = nextMatch?.index ?? artifact.length;
+    const content = artifact.slice(contentStart, contentEnd).trim();
+    sections.push({ heading, content });
+  }
+
+  return sections;
+}
+
+function formatHandoffSections(
+  sections: Array<{ heading: string; content: string }>,
+) {
+  return sections.map((section) =>
+    [
+      `## ${section.heading}`,
+      clipHandoffText(section.content || "- none", HANDOFF_SECTION_MAX_CHARS),
+    ].join("\n"),
+  );
+}
+
+function getMissingRequiredHandoffFieldsForSections(
+  agentRole: AgentRole,
+  sections: Array<{ heading: string }>,
+) {
+  const requiredFields = REQUIRED_HANDOFF_FIELDS[agentRole] ?? [];
+  return requiredFields.filter((field) => !hasHandoffSection(sections, field));
+}
+
+function getHandoffSectionContent(
+  sections: Array<{ heading: string; content: string }>,
+  requiredField: string,
+) {
+  const normalizedRequired = normalizeHandoffHeading(requiredField);
+  return (
+    sections.find((section) =>
+      normalizeHandoffHeading(section.heading).includes(normalizedRequired),
+    )?.content ?? ""
+  );
+}
+
+function hasHandoffSection(
+  sections: Array<{ heading: string }>,
+  requiredField: string,
+) {
+  const normalizedRequired = normalizeHandoffHeading(requiredField);
+  return sections.some((section) =>
+    normalizeHandoffHeading(section.heading).includes(normalizedRequired),
+  );
+}
+
+function isHandoffHeading(heading: string) {
+  const normalizedHeading = normalizeHandoffHeading(heading);
+  return HANDOFF_SECTION_HEADINGS.some((candidate) =>
+    normalizedHeading.includes(normalizeHandoffHeading(candidate)),
+  );
+}
+
+function normalizeHandoffHeading(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function clipHandoffText(value: string, maxChars: number) {
+  if (value.length <= maxChars) {
+    return value;
+  }
+
+  return `${value.slice(0, maxChars).trimEnd()}\n[truncated ${value.length - maxChars} chars]`;
+}
+
+function hasCompletedArtifact(runs: WorkerRun[], agentRole: AgentRole) {
+  return runs.some(
+    (run) =>
+      run.agentRole === agentRole &&
+      run.status === "completed" &&
+      run.artifact.trim(),
+  );
+}
+
+function formatListOrNone(items: string[]) {
+  return items.length > 0 ? items.map((item) => `- ${item}`) : ["- none"];
+}
+
+function stageGateResult(
+  result: Omit<
+    StageGateResult,
+    | "blockedRunId"
+    | "blockedAgentRole"
+    | "recoveryKind"
+    | "canAutoRepair"
+    | "canManualRetry"
+    | "needsClarification"
+  > &
+    Partial<
+      Pick<
+        StageGateResult,
+        | "blockedRunId"
+        | "blockedAgentRole"
+        | "recoveryKind"
+        | "canAutoRepair"
+        | "canManualRetry"
+        | "needsClarification"
+      >
+    >,
+): StageGateResult {
+  return {
+    blockedRunId: "",
+    blockedAgentRole: null,
+    recoveryKind: "none",
+    canAutoRepair: false,
+    canManualRetry: false,
+    needsClarification: false,
+    ...result,
+  };
+}
+
+export function isOpenWorkerRun(run: WorkerRun) {
+  return run.status === "queued" || run.status === "running";
+}
+
+export function isHandoffSchemaRun(run: Pick<WorkerRun, "error">) {
+  return run.error.startsWith("Agent handoff is incomplete.");
+}
+
+export function isRunHeartbeatStale(
+  run: Pick<WorkerRun, "updatedAt">,
+  now = Date.now(),
+) {
+  const updatedAt = Date.parse(run.updatedAt);
+  return (
+    Number.isFinite(updatedAt) && now - updatedAt > RUN_HEARTBEAT_STALE_MS
+  );
+}
+
+export function getEffectiveBlockingRun(runs: WorkerRun[]) {
+  const supersededRunIds = new Set(
+    runs
+      .map((run) => run.retryOfRunId)
+      .filter((runId): runId is string => Boolean(runId)),
+  );
+
+  return [...runs]
+    .reverse()
+    .find(
+      (run) =>
+        (run.status === "failed" || run.status === "blocked") &&
+        !supersededRunIds.has(run.runId),
+    );
+}
+
+export function evaluateWorkflowStageGate(
+  detail: WorkflowRequestDetail,
+): StageGateResult {
+  const { request, runs } = detail;
+  const blockers: string[] = [];
+  const nextActions: string[] = [];
+  const humanDecisions: string[] = [];
+  const openRun = [...runs].reverse().find(isOpenWorkerRun);
+  const failedRun = getEffectiveBlockingRun(runs);
+
+  if (!request.assignedWorkerId) {
+    blockers.push("No Local Worker is assigned to this request.");
+  }
+
+  if (failedRun) {
+    blockers.push(
+      `${formatAgentRole(failedRun.agentRole)} reported ${failedRun.status}: ${failedRun.error || "no error detail returned"}`,
+    );
+  }
+
+  if (openRun) {
+    const stale = isRunHeartbeatStale(openRun);
+    return stageGateResult({
+      status: "waiting",
+      label: stale ? "Run may be stuck" : "Worker running",
+      summary: stale
+        ? `${formatAgentRole(openRun.agentRole)} is ${openRun.status}, but its run heartbeat is stale.`
+        : `${formatAgentRole(openRun.agentRole)} is ${openRun.status}.`,
+      blockers,
+      nextActions: [
+        stale
+          ? "Synchronize worker status before retrying this Agent."
+          : "Wait for the assigned Local Worker to return artifacts.",
+      ],
+      humanDecisions,
+      blockedRunId: stale ? openRun.runId : "",
+      blockedAgentRole: stale ? openRun.agentRole : null,
+      recoveryKind: stale ? "stale_run" : "none",
+    });
+  }
+
+  if (request.interpretation.riskFlags.length > 0) {
+    const interpretationRun = [...runs]
+      .reverse()
+      .find(
+        (run) => run.agentRole === "agent0" && run.status === "completed",
+      );
+    return stageGateResult({
+      status: "human-decision",
+      label: "Human review required",
+      summary:
+        request.interpretation.source === "worker"
+          ? "Local Worker/Codex flagged high-risk operations. The App will not continue automatically."
+          : "The provisional preview flagged high-risk operations. Assign a Local Worker/Codex run or clarify scope before continuing.",
+      blockers,
+      nextActions: [
+        request.interpretation.source === "worker"
+          ? "Clarify scope or remove the high-risk operation before dispatch."
+          : "Run Local Worker/Codex interpretation before implementation.",
+      ],
+      humanDecisions: request.interpretation.riskFlags,
+      blockedRunId: interpretationRun?.runId ?? "",
+      blockedAgentRole: interpretationRun?.agentRole ?? null,
+      recoveryKind: "human_decision",
+      canManualRetry: Boolean(interpretationRun),
+      needsClarification: true,
+    });
+  }
+
+  if (request.status === "pr_ready") {
+    humanDecisions.push(
+      "Review Agent3 delivery artifact and approve Azure draft PR creation.",
+    );
+    return stageGateResult({
+      status: "human-decision",
+      label: "PR write approval required",
+      summary:
+        "The workflow is ready for a guarded Azure draft PR write after human approval.",
+      blockers,
+      nextActions: [
+        "Approve guarded draft PR creation when the App requests Azure write confirmation.",
+      ],
+      humanDecisions,
+      recoveryKind: "human_decision",
+    });
+  }
+
+  const nextAgent = getNextAgentRole(request, runs);
+  if (nextAgent) {
+    nextActions.push(`Dispatch ${formatAgentRole(nextAgent)} to the assigned Local Worker.`);
+  }
+
+  if (blockers.length > 0) {
+    const canAutoRepair =
+      failedRun && isHandoffSchemaRun(failedRun)
+        ? !runs.some(
+            (run) =>
+              run.retryOfRunId === failedRun.runId &&
+              run.dispatchReason === "auto_repair",
+          ) && failedRun.dispatchReason !== "auto_repair"
+        : false;
+    return stageGateResult({
+      status: "blocked",
+      label: "Blocked",
+      summary: "The request cannot continue until blockers are resolved.",
+      blockers,
+      nextActions,
+      humanDecisions,
+      blockedRunId: failedRun?.runId ?? "",
+      blockedAgentRole: failedRun?.agentRole ?? null,
+      recoveryKind: failedRun
+        ? isHandoffSchemaRun(failedRun)
+          ? "handoff_schema"
+          : failedRun.status === "failed"
+            ? "agent_failed"
+            : "agent_blocked"
+        : "none",
+      canAutoRepair,
+      canManualRetry: Boolean(failedRun),
+      needsClarification: Boolean(failedRun && !isHandoffSchemaRun(failedRun)),
+    });
+  }
+
+  if (request.status === "delivered" || request.status === "pr_created") {
+    const isNoPrDelivery =
+      request.status === "delivered" && request.deliveryMode === "no_pr";
+    return stageGateResult({
+      status: "ready",
+      label: isNoPrDelivery ? "Delivered" : "Tracked",
+      summary: isNoPrDelivery
+        ? "Request was completed without PR after Agent3 review."
+        : `Request is ${request.status}.`,
+      blockers,
+      nextActions,
+      humanDecisions,
+    });
+  }
+
+  return stageGateResult({
+    status: nextAgent ? "ready" : "blocked",
+    label: nextAgent ? "Ready" : "No automatic next step",
+    summary: nextAgent
+      ? `Ready to dispatch ${formatAgentRole(nextAgent)}.`
+      : "No automatic workflow transition is available for this state.",
+    blockers,
+    nextActions,
+    humanDecisions,
+  });
+}
+
+export function formatAgentRole(agentRole: AgentRole) {
+  const labels: Record<AgentRole, string> = {
+    agent0: "Agent 0: Thread Dispatcher",
+    agent1: "Agent 1: Source & Scope",
+    agent2: "Agent 2: Controlled Implementation",
+    agent3: "Agent 3: Review & Delivery",
+  };
+
+  return labels[agentRole];
+}
+
+export function formatWorkflowStage(stage: WorkflowStage) {
+  const labels: Record<WorkflowStage, string> = {
+    intake: "Intake",
+    dispatched: "Dispatched",
+    source_check: "Source Check",
+    ready_for_implementation: "Ready for Implementation",
+    running: "Implementation Running",
+    review: "Review",
+    pr_ready: "PR Ready",
+    pr_created: "PR Created",
+    delivered: "Delivered",
+    blocked: "Blocked",
+  };
+
+  return labels[stage];
+}
+
+export function formatDeliveryMode(deliveryMode: DeliveryMode) {
+  return deliveryMode === "no_pr"
+    ? "No PR - complete local changes"
+    : "Draft PR required";
+}
+
+export function formatEvidenceMode(evidenceMode: RequestEvidenceMode) {
+  return evidenceMode === "ui_only"
+    ? "UI-only visual evidence"
+    : "Standard source confirmation";
+}
+
+function getAgentResponsibility(agentRole: AgentRole) {
+  if (agentRole === "agent0") {
+    return "Decide the next agent thread and produce a clean startup prompt without reading full source context.";
+  }
+
+  if (agentRole === "agent1") {
+    return "Check confirmed sources, detect missing/conflicting sources, define scope/non-scope, and produce a Source Check Report.";
+  }
+
+  if (agentRole === "agent2") {
+    return "Create a Task Package, run implementability checks, implement only confirmed scope, and produce an Implementation Result.";
+  }
+
+  return "Review Agent2 output against confirmed sources and scope, verify evidence, and produce a Delivery Report.";
+}
+
+const WORKER_INTERPRETATION_OUTPUT_TEMPLATE = [
+  "```text",
+  "CONTROL_PLANE_INTERPRETATION_START",
+  "{",
+  '  "title": "short human-readable title",',
+  '  "kind": "REQ | BUG | REF | DOC | OPS",',
+  '  "taskLevel": "Level 0 | Level 1 | Level 2 | Level 3",',
+  '  "summary": "classification summary; do not claim sources are confirmed",',
+  '  "suggestedNextAgent": "agent1",',
+  '  "missingSources": ["Spec / business rule confirmation"],',
+  '  "sourceWarnings": ["User text is intake evidence only"],',
+  '  "riskFlags": [],',
+  '  "guardrails": ["Do not invent requirements, API fields, UI behavior, QA criteria, or implementation scope."]',
+  "}",
+  "CONTROL_PLANE_INTERPRETATION_END",
+  "```",
+].join("\n");
+
+function formatWorkflowAzureReference(request: WorkflowRequest) {
+  if (request.azureReferenceType === "pr" && request.azureReferenceId) {
+    return `Azure PR #${request.azureReferenceId}`;
+  }
+
+  if (
+    request.azureReferenceType === "work-item" &&
+    request.azureReferenceId
+  ) {
+    const evidence = normalizeAzureReferenceEvidence(
+      request.azureReferenceEvidence,
+      request.azureReferenceType,
+      request.azureReferenceId,
+    );
+    const suffix =
+      evidence.status === "verified"
+        ? "verified"
+        : evidence.status === "unverified"
+          ? "unverified"
+          : "tracking reference only";
+    return `Azure 單號: ${request.azureReferenceId} (${suffix})`;
+  }
+
+  return "none";
+}
+
+function formatDeliveryModeGuidance(deliveryMode: DeliveryMode) {
+  if (deliveryMode === "no_pr") {
+    return [
+      "- This request does not require an Azure draft PR.",
+      "- Complete the local project changes, run appropriate verification, and report final delivery evidence.",
+      "- Do not prepare Azure PR metadata unless the control plane changes the delivery mode.",
+    ].join("\n");
+  }
+
+  return [
+    "- This request is expected to end at PR Ready after Agent3 review.",
+    "- Prepare delivery evidence for a guarded Azure draft PR, but do not write Azure state from the Agent.",
+    "- Azure draft PR creation still requires human approval in the App.",
+  ].join("\n");
+}
+
+function hasOpenRun(runs: WorkerRun[]) {
+  return runs.some(isOpenWorkerRun);
+}
+
+function requireTrimmed(value: unknown, field: string) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${field} is required.`);
+  }
+
+  return value.trim();
+}
+
+function requireOptionalTrimmed(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeRequestKind(value: unknown): RequestKind {
+  if (
+    value === "REQ" ||
+    value === "BUG" ||
+    value === "REF" ||
+    value === "DOC" ||
+    value === "OPS"
+  ) {
+    return value;
+  }
+
+  return "REQ";
+}
+
+function normalizeTaskLevel(value: unknown): TaskLevel {
+  if (
+    value === "Level 0" ||
+    value === "Level 1" ||
+    value === "Level 2" ||
+    value === "Level 3"
+  ) {
+    return value;
+  }
+
+  return "Level 2";
+}
+
+function normalizeAzureReferenceType(value: unknown): AzureReferenceType {
+  if (value === "pr" || value === "work-item") {
+    return value;
+  }
+
+  return "none";
+}
+
+function normalizeDeliveryMode(value: unknown): DeliveryMode {
+  return value === "no_pr" ? "no_pr" : "draft_pr";
+}
+
+function normalizeEvidenceMode(value: unknown): RequestEvidenceMode {
+  return value === "ui_only" ? "ui_only" : "standard";
+}
+
+export function normalizeAzureReferenceEvidence(
+  value: unknown,
+  referenceType: AzureReferenceType,
+  referenceId: string,
+): AzureReferenceEvidence {
+  const base: AzureReferenceEvidence = {
+    status: referenceType === "none" || !referenceId ? "none" : "tracking",
+    referenceType,
+    referenceId,
+    checkedAt: "",
+    title: "",
+    workItemType: "",
+    workItemState: "",
+    assignedTo: "",
+    areaPath: "",
+    iterationPath: "",
+    webUrl: "",
+    summary: "",
+    error: "",
+  };
+
+  if (referenceType === "none" || !referenceId) {
+    return base;
+  }
+
+  if (!value || typeof value !== "object") {
+    return base;
+  }
+
+  const record = value as Record<string, unknown>;
+  const status = normalizeAzureReferenceEvidenceStatus(record.status);
+  return {
+    ...base,
+    status,
+    referenceType,
+    referenceId,
+    checkedAt: requireOptionalTrimmed(record.checkedAt),
+    title: requireOptionalTrimmed(record.title),
+    workItemType: requireOptionalTrimmed(record.workItemType),
+    workItemState: requireOptionalTrimmed(record.workItemState),
+    assignedTo: requireOptionalTrimmed(record.assignedTo),
+    areaPath: requireOptionalTrimmed(record.areaPath),
+    iterationPath: requireOptionalTrimmed(record.iterationPath),
+    webUrl: requireOptionalTrimmed(record.webUrl),
+    summary: requireOptionalTrimmed(record.summary),
+    error: requireOptionalTrimmed(record.error),
+  };
+}
+
+function normalizeAzureReferenceEvidenceStatus(
+  value: unknown,
+): AzureReferenceEvidenceStatus {
+  if (value === "verified" || value === "unverified") {
+    return value;
+  }
+
+  return "tracking";
+}

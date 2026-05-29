@@ -1,0 +1,454 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+const {
+  buildWorkflowAgentPacket,
+  createWorkflowRequestFromInput,
+  evaluateWorkflowStageGate,
+  getNextAgentRole,
+  getStageAfterCompletedAgent,
+  getStageForQueuedAgent,
+} = await import("../src/lib/control-plane-workflow.ts");
+const { summarizeStageGateBlockers } = await import(
+  "../src/lib/blocker-summary.ts"
+);
+
+test("workflow dispatches Agent0 through Agent3 in the expected order", () => {
+  const request = sampleRequest();
+
+  assert.equal(getNextAgentRole(request, []), "agent0");
+  assert.equal(getStageForQueuedAgent("agent0"), "dispatched");
+  assert.equal(getStageAfterCompletedAgent("agent0"), "source_check");
+  assert.equal(getStageAfterCompletedAgent("agent1"), "ready_for_implementation");
+  assert.equal(getStageAfterCompletedAgent("agent2"), "review");
+  assert.equal(getStageAfterCompletedAgent("agent3"), "pr_ready");
+  assert.equal(getStageAfterCompletedAgent("agent3", "no_pr"), "delivered");
+
+  assert.equal(
+    getNextAgentRole({ ...request, status: "ready_for_implementation" }, []),
+    "agent2",
+  );
+  assert.equal(getNextAgentRole({ ...request, status: "review" }, []), "agent3");
+  assert.equal(getNextAgentRole({ ...request, status: "pr_ready" }, []), null);
+});
+
+test("workflow packet is role-specific and keeps implementation packet lean", () => {
+  const request = sampleRequest();
+  const packet = buildWorkflowAgentPacket(request, "agent2", [
+    sampleRun({
+      agentRole: "agent1",
+      artifact: [
+        "# Source Check Report",
+        "",
+        "## Confirmed Requirements",
+        "- Add the member filter behavior verified by product notes.",
+        "",
+        "## Confirmed Scope",
+        "- Update the admin agent member list filter only.",
+        "",
+        "## Allowed Files",
+        "- apps/admin-agent-web/src/views/AgentDirectoryView.vue",
+        "- apps/admin-agent-web/src/views/AgentDirectoryView.test.ts",
+        "",
+        "## Non-Scope",
+        "- Do not change shared API contracts.",
+        "",
+        "## Do Not Touch",
+        "- package.json",
+        "- .env files",
+        "",
+        "## Can Proceed",
+        "yes",
+        "",
+        "## Task Package For Agent2",
+        "- Implement only the allowed files and run targeted view tests.",
+        "",
+        "## Raw Notes",
+        "- THIS RAW NOTE SHOULD NOT TRAVEL TO THE NEXT AGENT.",
+      ].join("\n"),
+      status: "completed",
+    }),
+  ]);
+
+  assert.match(packet, /Request ID: REQ-202605251430-member-filter/);
+  assert.match(packet, /Agent 2: Controlled Implementation/);
+  assert.match(packet, /Delivery Mode: Draft PR required/);
+  assert.match(packet, /## Prior Handoff Summary/);
+  assert.match(packet, /Artifact title: Source Check Report/);
+  assert.match(packet, /## Confirmed Requirements/);
+  assert.match(packet, /## Allowed Files/);
+  assert.match(packet, /AgentDirectoryView\.vue/);
+  assert.match(packet, /## Non-Scope/);
+  assert.match(packet, /## Task Package For Agent2/);
+  assert.match(packet, /Azure writes require human approval/);
+  assert.doesNotMatch(packet, /## User Request/);
+  assert.doesNotMatch(packet, /THIS RAW NOTE SHOULD NOT TRAVEL/);
+  assert.doesNotMatch(packet, /直接用自然語言描述/);
+  assert.doesNotMatch(packet, /Delivery Report/);
+});
+
+test("workflow packet maps Azure Work Item reference to user-facing 單號", () => {
+  const packet = buildWorkflowAgentPacket(sampleRequest(), "agent0", []);
+
+  assert.match(packet, /Azure Reference: Azure 單號: 795/);
+  assert.match(packet, /Input Template: freeform/);
+  assert.match(packet, /Tracking reference only/);
+  assert.match(packet, /## User Request/);
+  assert.match(packet, /User request is intake evidence only/);
+  assert.doesNotMatch(packet, /Task Package and Implementation Result/);
+});
+
+test("workflow packet carries selected input template", () => {
+  const packet = buildWorkflowAgentPacket(
+    sampleRequest({ templateId: "ui_visual", evidenceMode: "ui_only" }),
+    "agent1",
+    [],
+  );
+
+  assert.match(packet, /Input Template: ui_visual/);
+  assert.match(packet, /Evidence Mode: UI-only visual evidence/);
+});
+
+test("workflow packet separates verified Azure Work Item evidence from tracking IDs", () => {
+  const trackingPacket = buildWorkflowAgentPacket(sampleRequest(), "agent1", []);
+  assert.match(trackingPacket, /## Azure Reference Status/);
+  assert.match(trackingPacket, /Tracking reference only/);
+  assert.doesNotMatch(trackingPacket, /## Verified Azure Work Item Evidence/);
+
+  const verifiedPacket = buildWorkflowAgentPacket(
+    sampleRequest({
+      azureReferenceEvidence: {
+        status: "verified",
+        referenceType: "work-item",
+        referenceId: "795",
+        checkedAt: "2026-05-28T03:00:00.000Z",
+        title: "Header role label",
+        workItemType: "Bug",
+        workItemState: "Active",
+        assignedTo: "QA",
+        areaPath: "Project",
+        iterationPath: "Project\\Sprint 1",
+        webUrl: "https://dev.azure.com/org/project/_workitems/edit/795",
+        summary: "Header role label",
+        error: "",
+      },
+    }),
+    "agent1",
+    [],
+  );
+
+  assert.match(verifiedPacket, /## Verified Azure Work Item Evidence/);
+  assert.match(verifiedPacket, /Title: Header role label/);
+  assert.match(verifiedPacket, /State: Active/);
+  assert.doesNotMatch(verifiedPacket, /Tracking reference only/);
+});
+
+test("UI-only visual evidence mode narrows Agent1 source requirements", () => {
+  const packet = buildWorkflowAgentPacket(
+    sampleRequest({
+      evidenceMode: "ui_only",
+      azureReferenceType: "none",
+      azureReferenceId: "",
+    }),
+    "agent1",
+    [],
+  );
+
+  assert.match(packet, /Evidence Mode: UI-only visual evidence/);
+  assert.match(packet, /Source strictness: contextual/);
+  assert.match(packet, /## UI-only Visual Evidence Mode/);
+  assert.match(
+    packet,
+    /Do not block solely for missing Figma, Swagger, or a formal spec/,
+  );
+  assert.match(
+    packet,
+    /Block only for unclear API fields, permissions, data source, role mapping, business rules/,
+  );
+  assert.match(packet, /limited visual evidence/);
+});
+
+test("blocker summaries translate common Agent1 English blockers", () => {
+  const summaries = summarizeStageGateBlockers([
+    [
+      "Agent1 source check cannot proceed: - Missing confirmed Spec / business rule source.",
+      "- Azure Work Item 795 was not confirmed from this environment.",
+      "- Existing code uses login identity values `agent` and `manager`; the requested display says `Agent/Admin`.",
+    ].join("\n"),
+  ]);
+
+  assert.deepEqual(
+    summaries.map((summary) => summary.title),
+    [
+      "缺少可驗證規格或業務規則",
+      "Azure 單號尚未驗證",
+      "角色文字對應不明",
+    ],
+  );
+  assert.match(summaries[1].original, /Azure Work Item 795/);
+});
+
+test("blocker summaries dedupe repeated fallback blockers", () => {
+  const summaries = summarizeStageGateBlockers([
+    "Agent1 source check cannot proceed: - unknown blocker A\n- unknown blocker A",
+    "Agent1 source check cannot proceed: - unknown blocker A",
+  ]);
+
+  assert.equal(summaries.length, 1);
+  assert.equal(summaries[0].title, "需要人工確認");
+  assert.equal(
+    summaries[0].original
+      .split("\n\n---\n\n")
+      .filter((item) => item.includes("unknown blocker A")).length,
+    1,
+  );
+});
+
+test("blocker summaries merge UI-only target and expectation gaps", () => {
+  const summaries = summarizeStageGateBlockers([
+    [
+      "Agent1 source check cannot proceed: - Which exact app/page/component or URL should Agent2 visually check or change?",
+      "- What is the confirmed expected visual result or evidence, such as screenshot, copy, color, spacing, placement, or simple visual state?",
+      "- blocked: the packet confirms only UI-only visual evidence mode. It does not identify the target surface or expected visual result.",
+    ].join("\n"),
+  ]);
+
+  assert.equal(summaries.length, 1);
+  assert.equal(summaries[0].title, "缺少 UI 目標與期望結果");
+  assert.match(summaries[0].nextAction, /app\/page\/component\/URL/);
+  assert.match(summaries[0].original, /expected visual result/);
+  assert.match(summaries[0].original, /target surface/);
+});
+
+test("Agent1 packet requires a source check schema with file scope and non-scope", () => {
+  const packet = buildWorkflowAgentPacket(sampleRequest(), "agent1", [
+    sampleRun({
+      agentRole: "agent0",
+      artifact: "# Agent0\n\nSuggested next agent: agent1",
+      status: "completed",
+    }),
+  ]);
+
+  assert.match(packet, /# Source Check Report/);
+  assert.match(packet, /## Confirmed Requirements/);
+  assert.match(packet, /## Allowed Files/);
+  assert.match(packet, /## Non-Scope/);
+  assert.match(packet, /## Do Not Touch/);
+  assert.match(packet, /## Task Package For Agent2/);
+  assert.match(packet, /file boundaries/);
+});
+
+test("Agent2 packet flags incomplete Agent1 handoff instead of filling gaps", () => {
+  const packet = buildWorkflowAgentPacket(sampleRequest(), "agent2", [
+    sampleRun({
+      agentRole: "agent1",
+      artifact: [
+        "# Source Check Report",
+        "",
+        "## Confirmed Requirements",
+        "- Add a member filter.",
+        "",
+        "## Can Proceed",
+        "yes",
+      ].join("\n"),
+      status: "completed",
+    }),
+  ]);
+
+  assert.match(packet, /Missing required handoff fields:/);
+  assert.match(packet, /Allowed Files/);
+  assert.match(packet, /Non-Scope/);
+  assert.match(packet, /Treat this handoff as incomplete/);
+  assert.doesNotMatch(packet, /## User Request/);
+});
+
+test("workflow stage gate blocks missing worker and waits for open runs", () => {
+  const request = sampleRequest({ assignedWorkerId: "" });
+  const blocked = evaluateWorkflowStageGate({
+    request,
+    runs: [],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(blocked.status, "blocked");
+  assert.deepEqual(blocked.blockers, [
+    "No Local Worker is assigned to this request.",
+  ]);
+
+  const waiting = evaluateWorkflowStageGate({
+    request: sampleRequest({ status: "running" }),
+    runs: [sampleRun({ status: "running", agentRole: "agent2" })],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(waiting.status, "waiting");
+  assert.match(waiting.summary, /Agent 2/);
+});
+
+test("workflow stage gate ignores blockers superseded by recovery runs", () => {
+  const blockedRun = sampleRun({
+    runId: "agent1-blocked",
+    agentRole: "agent1",
+    status: "blocked",
+    error:
+      "Agent handoff is incomplete. Missing required fields: Allowed Files.",
+  });
+  const recoveryRun = sampleRun({
+    runId: "agent1-recovery",
+    agentRole: "agent1",
+    status: "completed",
+    retryOfRunId: blockedRun.runId,
+    dispatchReason: "manual_retry",
+    artifact: "# Source Check Report\n\n## Confirmed Requirements\n- ok",
+  });
+  const stageGate = evaluateWorkflowStageGate({
+    request: sampleRequest({ status: "ready_for_implementation" }),
+    runs: [blockedRun, recoveryRun],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(stageGate.status, "ready");
+  assert.equal(stageGate.blockedRunId, "");
+  assert.equal(stageGate.blockers.length, 0);
+});
+
+test("workflow stage gate marks stale running run without enabling duplicate dispatch", () => {
+  const staleRun = sampleRun({
+    runId: "agent2-stale",
+    agentRole: "agent2",
+    status: "running",
+    updatedAt: "2026-05-25T06:00:00.000Z",
+  });
+  const stageGate = evaluateWorkflowStageGate({
+    request: sampleRequest({ status: "running" }),
+    runs: [staleRun],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(stageGate.status, "waiting");
+  assert.equal(stageGate.recoveryKind, "stale_run");
+  assert.equal(stageGate.blockedRunId, staleRun.runId);
+  assert.equal(stageGate.canManualRetry, false);
+});
+
+test("workflow waits for Local Worker/Codex interpretation before high-risk stop", () => {
+  const base = sampleRequest();
+  const highRiskRequest = sampleRequest({
+    interpretation: {
+      ...base.interpretation,
+      source: "provisional",
+      riskFlags: ["Deploy is outside this App's operation scope."],
+    },
+  });
+  const waiting = evaluateWorkflowStageGate({
+    request: { ...highRiskRequest, status: "dispatched" },
+    runs: [sampleRun({ status: "queued", agentRole: "agent0" })],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(waiting.status, "waiting");
+
+  const stopped = evaluateWorkflowStageGate({
+    request: {
+      ...highRiskRequest,
+      status: "blocked",
+      interpretation: {
+        ...highRiskRequest.interpretation,
+        source: "worker",
+      },
+    },
+    runs: [sampleRun({ status: "completed", agentRole: "agent0" })],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(stopped.status, "human-decision");
+  assert.match(stopped.summary, /Local Worker\/Codex flagged/);
+});
+
+test("workflow PR-ready gate requires human Azure write approval", () => {
+  const stageGate = evaluateWorkflowStageGate({
+    request: sampleRequest({ status: "pr_ready" }),
+    runs: [],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(stageGate.status, "human-decision");
+  assert.match(stageGate.summary, /guarded Azure draft PR write/);
+  assert.equal(stageGate.humanDecisions.length, 1);
+});
+
+test("workflow no-PR delivery is tracked as completed after Agent3 review", () => {
+  const request = sampleRequest({ deliveryMode: "no_pr", status: "delivered" });
+  const stageGate = evaluateWorkflowStageGate({
+    request,
+    runs: [
+      sampleRun({
+        agentRole: "agent3",
+        status: "completed",
+        artifact: "# Delivery Report\n\nNo PR required.",
+      }),
+    ],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(stageGate.status, "ready");
+  assert.equal(stageGate.label, "Delivered");
+  assert.match(stageGate.summary, /without PR/);
+  assert.equal(
+    getNextAgentRole(
+      sampleRequest({ deliveryMode: "no_pr", status: "review" }),
+      [],
+    ),
+    "agent3",
+  );
+});
+
+function sampleRequest(overrides = {}) {
+  return {
+    ...createWorkflowRequestFromInput(
+      {
+        kind: "REQ",
+        title: "Member filter",
+        detail: "Add a member filter.",
+        taskLevel: "Level 2",
+        owner: "Michael",
+        assignedWorkerId: "michael-local",
+        azureReferenceType: "work-item",
+        azureReferenceId: "795",
+      },
+      new Date(2026, 4, 25, 14, 30),
+    ),
+    ...overrides,
+  };
+}
+
+function sampleRun(overrides = {}) {
+  return {
+    runId: "run-1",
+    requestId: "REQ-202605251430-member-filter",
+    agentRole: "agent0",
+    workerId: "michael-local",
+    repoPath: "C:\\workspace\\repo",
+    status: "queued",
+    retryOfRunId: "",
+    dispatchReason: "normal",
+    packet: "packet",
+    commandOutput: "",
+    diffSummary: "",
+    artifact: "",
+    error: "",
+    createdAt: "2026-05-25T06:30:00.000Z",
+    startedAt: null,
+    completedAt: null,
+    updatedAt: "2026-05-25T06:30:00.000Z",
+    ...overrides,
+  };
+}

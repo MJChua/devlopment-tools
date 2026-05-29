@@ -1,0 +1,13 @@
+.next/
+node_modules/
+out/
+build/
+dist/
+.env
+.env*.local
+*.log
+coverage/
+.next-dev.log
+.playwright-cli/
+.control-plane/
+.codex-artifacts/
