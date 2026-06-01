@@ -54,15 +54,20 @@ test("testing-stage write policy allows only AITraining source branches", () => 
   assert.equal(isTestWriteAllowedBranch("refs/heads/AITraining/test_p"), true);
   assert.equal(isTestWriteAllowedBranch("AI_Training/test_p"), false);
   assert.equal(isTestWriteAllowedBranch("bug/775"), false);
+  assert.equal(isTestWriteAllowedBranch("hotfix/390"), false);
   assert.equal(
     getTestWritePolicyMessage("refs/heads/bug/775"),
     'Testing-stage Azure writes are limited to AITraining/ branches. "bug/775" is read-only.',
   );
 });
 
-test("formal PR delivery policy allows numbered feature and bug branches targeting develop", () => {
+test("formal PR delivery policy allows numbered feature, bug, and hotfix branches without suffixes", () => {
   assert.equal(isTeamPrDeliveryBranch("feature/725"), true);
   assert.equal(isTeamPrDeliveryBranch("refs/heads/bug/399"), true);
+  assert.equal(isTeamPrDeliveryBranch("hotfix/390"), true);
+  assert.equal(isTeamPrDeliveryBranch("feature/390-title"), false);
+  assert.equal(isTeamPrDeliveryBranch("bug/390-fix"), false);
+  assert.equal(isTeamPrDeliveryBranch("hotfix/390-prod"), false);
   assert.equal(isTeamPrDeliveryBranch("feature/member-filter"), false);
   assert.equal(isTeamPrDeliveryBranch("AITraining/test_p"), false);
   assert.equal(isTeamPrDeliveryTargetBranch("develop"), true);
@@ -75,8 +80,27 @@ test("formal PR delivery policy allows numbered feature and bug branches targeti
     buildTeamPrDeliveryBranch({ workItemId: "725", requestKind: "REQ" }),
     "feature/725",
   );
+  assert.equal(
+    buildTeamPrDeliveryBranch({ workItemId: "390", requestKind: "HOTFIX" }),
+    "hotfix/390",
+  );
+  assert.equal(
+    buildTeamPrDeliveryBranch({ workItemId: "390-title", requestKind: "REQ" }),
+    "",
+  );
   assert.equal(getTeamPrBranchKind({ workItemType: "Bug" }), "bug");
   assert.equal(getTeamPrBranchKind({ requestKind: "BUG" }), "bug");
+  assert.equal(getTeamPrBranchKind({ requestKind: "HOTFIX" }), "hotfix");
+});
+
+test("local worker explains verified Work Item requirement for formal PR branches", () => {
+  const source = readFileSync(
+    new URL("../scripts/local-worker.mjs", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /no verified Azure Work Item/);
+  assert.match(source, /feature\/\{id\}, bug\/\{id\}, or hotfix\/\{id\}/);
 });
 
 test("Work Item filter WIQL does not exclude states or types by default", () => {
@@ -232,8 +256,18 @@ test("Create PR validation rejects invalid targets before Azure client work", ()
 test("repo rule engine keeps branch targets and stage gate regression-safe", () => {
   assert.equal(getRecommendedTargetBranch("feature/member-filter"), "develop");
   assert.equal(getRecommendedTargetBranch("bug/775"), "develop");
+  assert.equal(getRecommendedTargetBranch("hotfix/390"), "develop");
   assert.equal(getRecommendedTargetBranch("AITraining/test_p"), "develop");
   assert.equal(getRecommendedTargetBranch("AI_Training/test_p"), "develop");
+  assert.deepEqual(
+    getCreatePullRequestWarnings({
+      sourceBranch: "hotfix/390",
+      targetBranch: "develop",
+    }),
+    [
+      "Hotfix branch target policy is pending until the production release flow is finalized.",
+    ],
+  );
   assert.deepEqual(
     getCreatePullRequestWarnings({
       sourceBranch: "feature/member-filter",

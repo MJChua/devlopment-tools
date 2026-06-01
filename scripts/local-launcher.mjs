@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 
@@ -8,6 +8,8 @@ import {
   LOCAL_LAUNCHER_HOST,
   LOCAL_LAUNCHER_PORT,
   LOCAL_LAUNCHER_VERSION,
+  WORKER_MANIFEST_FILE,
+  applyWorkerManifestToProfile,
   buildCorsHeaders,
   buildControlPlaneAzureRequestBody,
   buildWorkerEnvironment,
@@ -15,10 +17,14 @@ import {
   deleteLauncherProfile,
   ensureLauncherDirectories,
   getLauncherPaths,
+  getWorkerManifestFile,
+  hashWorkerFileContent,
+  isWorkerManifestCurrent,
   listLauncherProfiles,
   loadLauncherConfig,
   loadLauncherProfile,
   mergeLauncherProfileForConnect,
+  normalizeWorkerBootstrapManifest,
   normalizeConnectPayload,
   redactProfile,
   saveLauncherProfile,
@@ -152,6 +158,28 @@ async function handleRequest(request, response) {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/refresh-worker") {
+      const payload = await readJsonBody(request);
+      const workerId = String(payload.workerId || "").trim();
+      if (!workerId) {
+        throw new Error("workerId is required.");
+      }
+      const profile = await refreshWorkerProfile(workerId);
+      sendJson(
+        response,
+        200,
+        {
+          ok: true,
+          profile: {
+            ...redactProfile(profile),
+            running: isPidRunning(profile.workerPid),
+          },
+        },
+        corsHeaders,
+      );
+      return;
+    }
+
     const workItemDetailMatch = url.pathname.match(/^\/azure\/work-item\/(\d+)$/);
     const prDiscoverMatch = url.pathname.match(
       /^\/requests\/([^/]+)\/pr-discover$/,
@@ -201,10 +229,12 @@ async function connectProfile(profile) {
   );
   const nextProfile = mergeLauncherProfileForConnect(profile, existingProfile);
 
-  await downloadWorkerFiles(nextProfile.controlPlaneUrl);
-  const started = await startWorkerProcess(nextProfile);
+  const manifest = await downloadWorkerFiles(nextProfile.controlPlaneUrl);
+  await stopKnownProcess(nextProfile.workerId, existingProfile?.workerPid || 0);
+  const readyProfile = applyWorkerManifestToProfile(nextProfile, manifest);
+  const started = await startWorkerProcess(readyProfile);
   const updatedProfile = {
-    ...nextProfile,
+    ...readyProfile,
     workerPid: started.pid,
     updatedAt: new Date().toISOString(),
   };
@@ -237,17 +267,37 @@ async function startSavedProfiles() {
   const profiles = await listLauncherProfiles(paths);
   for (const profile of profiles) {
     try {
-      await downloadWorkerFiles(profile.controlPlaneUrl);
+      const manifest = await fetchWorkerManifest(profile.controlPlaneUrl);
       if (profile.workerPid && isPidRunning(profile.workerPid)) {
-        workerProcesses.set(profile.workerId, profile.workerPid);
+        if (isWorkerManifestCurrent(profile, manifest)) {
+          workerProcesses.set(profile.workerId, profile.workerPid);
+          continue;
+        }
+        const downloadedManifest = await downloadWorkerFiles(profile.controlPlaneUrl);
+        await stopKnownProcess(profile.workerId, profile.workerPid);
+        const readyProfile = applyWorkerManifestToProfile(
+          profile,
+          downloadedManifest,
+        );
+        const started = await startWorkerProcess(readyProfile);
+        const updatedProfile = {
+          ...readyProfile,
+          workerPid: started.pid,
+          updatedAt: new Date().toISOString(),
+        };
+        await saveLauncherProfile(paths, updatedProfile);
+        await appendLauncherLog(`auto-started worker ${profile.workerId}`);
         continue;
       }
-      const started = await startWorkerProcess(profile);
-      await saveLauncherProfile(paths, {
-        ...profile,
+      const downloadedManifest = await downloadWorkerFiles(profile.controlPlaneUrl);
+      const readyProfile = applyWorkerManifestToProfile(profile, downloadedManifest);
+      const started = await startWorkerProcess(readyProfile);
+      const updatedProfile = {
+        ...readyProfile,
         workerPid: started.pid,
         updatedAt: new Date().toISOString(),
-      });
+      };
+      await saveLauncherProfile(paths, updatedProfile);
       await appendLauncherLog(`auto-started worker ${profile.workerId}`);
     } catch (error) {
       await appendLauncherLog(
@@ -284,12 +334,14 @@ async function startWorkerProcess(profile) {
 
 async function startVisibleCodexSetup(workerId) {
   const profile = await loadLauncherProfile(paths, workerId);
-  await downloadWorkerFiles(profile.controlPlaneUrl);
+  const manifest = await downloadWorkerFiles(profile.controlPlaneUrl);
+  const readyProfile = applyWorkerManifestToProfile(profile, manifest);
+  await saveLauncherProfile(paths, readyProfile);
   await stopKnownProcess(workerId, profile.workerPid);
 
   const env = {
     ...process.env,
-    ...buildWorkerEnvironment(profile),
+    ...buildWorkerEnvironment(readyProfile),
     CODEX_MISSION_CONTROL_WORKER_ROOT: paths.workerRoot,
   };
   const setupCommand = [
@@ -345,6 +397,22 @@ async function clearProfilePat(workerId) {
   return profile;
 }
 
+async function refreshWorkerProfile(workerId) {
+  const profile = await loadLauncherProfile(paths, workerId);
+  const manifest = await downloadWorkerFiles(profile.controlPlaneUrl);
+  await stopKnownProcess(workerId, profile.workerPid || 0);
+  const readyProfile = applyWorkerManifestToProfile(profile, manifest);
+  const started = await startWorkerProcess(readyProfile);
+  const updatedProfile = {
+    ...readyProfile,
+    workerPid: started.pid,
+    updatedAt: new Date().toISOString(),
+  };
+  await saveLauncherProfile(paths, updatedProfile);
+  await appendLauncherLog(`refreshed worker ${workerId}`);
+  return updatedProfile;
+}
+
 async function stopKnownProcess(workerId, pid) {
   const knownPid = Number(pid || workerProcesses.get(workerId) || 0);
   workerProcesses.delete(workerId);
@@ -366,6 +434,9 @@ async function getStatus(workerId) {
         hasAzurePat: Boolean(profile?.azurePat),
         running: Boolean(pid && isPidRunning(pid)),
         pid: pid || null,
+        workerVersion: profile?.workerVersion || "",
+        workerScriptHash: profile?.workerScriptHash || "",
+        workerUpdatedAt: profile?.workerUpdatedAt || "",
       };
   }
 
@@ -382,23 +453,65 @@ async function getStatus(workerId) {
   };
 }
 
+async function fetchWorkerManifest(controlPlaneUrl) {
+  const response = await fetch(
+    `${controlPlaneUrl}/api/workers/bootstrap?file=${encodeURIComponent(WORKER_MANIFEST_FILE)}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to download worker manifest: HTTP ${response.status}.`);
+  }
+  return normalizeWorkerBootstrapManifest(await response.json());
+}
+
 async function downloadWorkerFiles(controlPlaneUrl) {
+  const manifest = await fetchWorkerManifest(controlPlaneUrl);
+  const tempRoot = path.join(
+    paths.workerRoot,
+    `.download-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  );
   await mkdir(paths.workerRoot, { recursive: true });
-  for (const workerFile of workerFiles) {
-    const response = await fetch(
-      `${controlPlaneUrl}/api/workers/bootstrap?file=${encodeURIComponent(workerFile)}`,
-      { cache: "no-store" },
-    );
-    if (!response.ok) {
-      throw new Error(
-        `Failed to download ${workerFile}: HTTP ${response.status}.`,
+  await mkdir(tempRoot, { recursive: true });
+  try {
+    for (const workerFile of workerFiles) {
+      const expected = getWorkerManifestFile(manifest, workerFile);
+      if (!expected) {
+        throw new Error(`Worker manifest is missing ${workerFile}.`);
+      }
+
+      const response = await fetch(
+        `${controlPlaneUrl}/api/workers/bootstrap?file=${encodeURIComponent(workerFile)}`,
+        { cache: "no-store" },
       );
+      if (!response.ok) {
+        throw new Error(
+          `Failed to download ${workerFile}: HTTP ${response.status}.`,
+        );
+      }
+      const content = await response.text();
+      const actualHash = hashWorkerFileContent(content);
+      if (actualHash !== expected.sha256) {
+        throw new Error(
+          `Downloaded ${workerFile} failed integrity check. Expected ${expected.sha256}, got ${actualHash}.`,
+        );
+      }
+      await writeFile(path.join(tempRoot, workerFile), content, "utf8");
     }
+
     await writeFile(
-      path.join(paths.workerRoot, workerFile),
-      await response.text(),
+      path.join(tempRoot, WORKER_MANIFEST_FILE),
+      JSON.stringify(manifest, null, 2),
       "utf8",
     );
+
+    for (const workerFile of [...workerFiles, WORKER_MANIFEST_FILE]) {
+      const target = path.join(paths.workerRoot, workerFile);
+      await rm(target, { force: true });
+      await rename(path.join(tempRoot, workerFile), target);
+    }
+    return manifest;
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
   }
 }
 

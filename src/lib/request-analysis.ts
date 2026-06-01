@@ -40,6 +40,17 @@ const BUG_TERMS = [
 ];
 const REF_TERMS = ["refactor", "cleanup", "重構", "整理", "抽共用", "共用"];
 const DOC_TERMS = ["doc", "docs", "document", "readme", "文件", "規則", "說明"];
+const HOTFIX_TERMS = [
+  "hotfix",
+  "hot fix",
+  "production fix",
+  "prod fix",
+  "urgent fix",
+  "emergency fix",
+  "緊急修補",
+  "緊急修正",
+  "急修",
+];
 const OPS_TERMS = [
   "ci",
   "cd",
@@ -349,6 +360,10 @@ export function inferTitle(detail: string) {
 }
 
 function inferKind(lower: string): RequestKind {
+  if (hasAnyTerm(lower, HOTFIX_TERMS)) {
+    return "HOTFIX";
+  }
+
   if (hasAnyTerm(lower, BUG_TERMS)) {
     return "BUG";
   }
@@ -372,6 +387,7 @@ function normalizeKind(value: unknown): RequestKind | null {
   if (
     value === "REQ" ||
     value === "BUG" ||
+    value === "HOTFIX" ||
     value === "REF" ||
     value === "DOC" ||
     value === "OPS"
@@ -408,7 +424,7 @@ function inferTaskLevel(
     return "Level 0";
   }
 
-  if (kind === "BUG" || detailLength < 240) {
+  if (kind === "BUG" || kind === "HOTFIX" || detailLength < 240) {
     return "Level 1";
   }
 

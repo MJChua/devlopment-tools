@@ -208,8 +208,9 @@ test("Agent3 block review keeps request blocked instead of PR ready", async () =
     detail: "Add MJ to topbar.",
     assignedWorkerId: worker.workerId,
     repoPath,
-    azureReferenceType: "none",
-    azureReferenceId: "",
+    azureReferenceType: "work-item",
+    azureReferenceId: "795",
+    azureReferenceEvidence: verifiedAzureReferenceEvidence("795"),
   });
   const agent0 = dispatchNextAgent({ requestId: request.requestId });
   completeAndAssertNext({
@@ -296,8 +297,9 @@ test("Agent3 uses Agent2 execution repo path when worker reports a request workt
     detail: "Add UI copy.",
     assignedWorkerId: worker.workerId,
     repoPath,
-    azureReferenceType: "none",
-    azureReferenceId: "",
+    azureReferenceType: "work-item",
+    azureReferenceId: "795",
+    azureReferenceEvidence: verifiedAzureReferenceEvidence("795"),
   });
   const agent0 = dispatchNextAgent({ requestId: request.requestId });
   completeAndAssertNext({
@@ -376,8 +378,9 @@ test("request resume snapshot and packet pressure metadata persist across dispat
     detail: "Add UI copy.",
     assignedWorkerId: worker.workerId,
     repoPath,
-    azureReferenceType: "none",
-    azureReferenceId: "",
+    azureReferenceType: "work-item",
+    azureReferenceId: "795",
+    azureReferenceEvidence: verifiedAzureReferenceEvidence("795"),
   });
   const agent0 = dispatchNextAgent({ requestId: request.requestId });
   completeAndAssertNext({
@@ -914,8 +917,9 @@ test("Agent1 structured command output fixes generic worker artifact", async () 
     detail: "Fix a generic artifact handoff.",
     assignedWorkerId: worker.workerId,
     repoPath,
-    azureReferenceType: "none",
-    azureReferenceId: "",
+    azureReferenceType: "work-item",
+    azureReferenceId: "795",
+    azureReferenceEvidence: verifiedAzureReferenceEvidence("795"),
   });
   const agent0 = dispatchNextAgent({ requestId: request.requestId });
   completeWorkerRun(worker.workerId, worker.token, agent0.runId, {
@@ -1131,8 +1135,9 @@ test("schema-blocked run can synchronize valid handoff from command output", asy
     detail: "Recover the existing command output.",
     assignedWorkerId: worker.workerId,
     repoPath,
-    azureReferenceType: "none",
-    azureReferenceId: "",
+    azureReferenceType: "work-item",
+    azureReferenceId: "795",
+    azureReferenceEvidence: verifiedAzureReferenceEvidence("795"),
   });
   const agent0 = dispatchNextAgent({ requestId: request.requestId });
   completeWorkerRun(worker.workerId, worker.token, agent0.runId, {
@@ -1216,6 +1221,79 @@ test("worker guard blocks PAT clear while an Agent task is queued", async () => 
     () => assertWorkerHasNoActiveRuns(worker.workerId, "clear PAT"),
     /Cannot clear PAT while an Agent task is queued or running/,
   );
+});
+
+test("worker runtime metadata is stored and mismatched hashes block dispatch", async () => {
+  const {
+    createRequest,
+    dispatchNextAgent,
+    registerWorker,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+  const { getWorkerBootstrapManifest, getWorkerScriptHash } = await import(
+    "../src/lib/worker-bootstrap-manifest.ts"
+  );
+  const manifest = getWorkerBootstrapManifest();
+  const repoPath = "C:\\workspace\\worker-runtime";
+  const worker = registerWorker({
+    workerId: `worker-runtime-${randomUUID()}`,
+    displayName: "Runtime Worker",
+    commandTemplate: "echo ok",
+  });
+
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "worker-runtime", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+    runtime: {
+      workerVersion: manifest.workerVersion,
+      workerScriptHash: "0".repeat(64),
+      launcherVersion: "0.2.0",
+      workerUpdatedAt: "2026-05-29T00:00:00.000Z",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+  const request = createRequest({
+    detail: "Dispatch should wait for a matching worker script.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+  });
+
+  assert.throws(
+    () => dispatchNextAgent({ requestId: request.requestId }),
+    /Worker 版本不同步/,
+  );
+
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "worker-runtime", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+    runtime: {
+      workerVersion: manifest.workerVersion,
+      workerScriptHash: getWorkerScriptHash(manifest),
+      launcherVersion: "0.2.0",
+      workerUpdatedAt: "2026-05-29T00:00:01.000Z",
+    },
+  });
+
+  assert.equal(dispatchNextAgent({ requestId: request.requestId }).status, "queued");
 });
 
 test("PR traceability links only verified PR-ready draft PR requests", async () => {
@@ -1562,6 +1640,25 @@ function sampleMultiCandidateSourceCheckArtifact() {
     }),
     "CONTROL_PLANE_CLARIFICATION_PROMPT_END",
   ].join("\n");
+}
+
+function verifiedAzureReferenceEvidence(referenceId, overrides = {}) {
+  return {
+    status: "verified",
+    referenceType: "work-item",
+    referenceId,
+    checkedAt: "2026-05-28T03:00:00.000Z",
+    title: `Verified Work Item ${referenceId}`,
+    workItemType: "Feature",
+    workItemState: "Active",
+    assignedTo: "QA",
+    areaPath: "Project",
+    iterationPath: "Project\\Sprint 1",
+    webUrl: `https://dev.azure.com/org/project/_workitems/edit/${referenceId}`,
+    summary: `Verified Work Item ${referenceId}`,
+    error: "",
+    ...overrides,
+  };
 }
 
 function getRun(detail, agentRole) {

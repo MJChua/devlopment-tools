@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+import { getWorkerBootstrapManifest } from "../../../../lib/worker-bootstrap-manifest.ts";
+
 export const runtime = "nodejs";
 
 const BOOTSTRAP_FILES = new Map([
@@ -9,6 +11,7 @@ const BOOTSTRAP_FILES = new Map([
   ["local-launcher.mjs", "text/javascript; charset=utf-8"],
   ["local-launcher-utils.mjs", "text/javascript; charset=utf-8"],
   ["local-launcher-install.ps1", "text/plain; charset=utf-8"],
+  ["worker-manifest.json", "application/json; charset=utf-8"],
 ]);
 
 export async function GET(request: Request) {
@@ -24,8 +27,14 @@ export async function GET(request: Request) {
       });
     }
 
+    if (fileName === "worker-manifest.json") {
+      return Response.json(getWorkerBootstrapManifest(), {
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+
     const script = await readFile(
-      path.join(process.cwd(), "scripts", fileName),
+      path.join(/*turbopackIgnore: true*/ process.cwd(), "scripts", fileName),
       "utf8",
     );
 

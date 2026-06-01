@@ -42,6 +42,8 @@ Request detail is not a confirmed specification. Agent1 must still verify source
 
 Each developer installs the Windows Local Launcher once on their own machine. The launcher listens only on that developer's `127.0.0.1:17320`, stores the worker profile with Windows DPAPI, and starts `scripts/local-worker.mjs` as a background local process.
 
+The launcher downloads a worker manifest from `/api/workers/bootstrap?file=worker-manifest.json` before starting the worker. It writes worker files into a temporary download directory, verifies the SHA-256 hash for `local-worker.mjs` and `local-worker-utils.mjs`, then replaces the local worker cache. The worker reports its version, script hash, launcher version, and update time in repository and run heartbeats. If the App detects a hash mismatch, it blocks dispatch with a worker-version message instead of treating it as an Agent source blocker.
+
 The worker uses:
 
 - The developer's local repository path.
@@ -78,6 +80,8 @@ The App registration form does not store a user's Azure PAT. The PAT input is on
 The auto commit / draft PR checkbox is a user preference for the Local Worker flow. It does not allow merge PR, abandon PR, deploy, branch policy mutation, Work Item field mutation, or any Azure write that fails the control-plane guarded write policy.
 
 Repository discovery and Codex readiness are reported by the local worker started by the user's Local Launcher. The App does not scan the user's filesystem from the browser or depend on server-side directory scanning for the ordinary repository dropdown. `scripts/local-worker.mjs` scans candidate user folders on the developer's machine and posts repository candidates plus `codexReady / codexStatus / codexError / codexDiagnosticCode / codexExecutablePath` to `/api/workers/repositories`. When the user selects a repository from the worker-reported dropdown, the App saves that path on the worker record. Creating a request snapshots the selected repository onto the Request ID, and each queued Agent run stores the same repository snapshot so Agent0-3 execute in the original selected project even if the worker later switches to another repository.
+
+Worker runtime failures are separated from Agent blockers. Missing internal functions, script hash mismatch, and other worker-side `ReferenceError` failures are shown as `本機 Worker 版本不同步`; the user can choose `重新下載並重啟 Worker`, then retry the same Agent. Dirty repo and merge-conflict blockers are shown as repo-state blockers with the affected git status, not as missing requirement evidence.
 
 Agent0 / Codex should include the following block in its output so the App can update request metadata from the Local Worker instead of relying on the provisional browser preview:
 
@@ -157,7 +161,7 @@ Not required for the MVP:
 
 Each request stores a delivery mode:
 
-- `draft_pr`: the default team delivery mode. Agent2 works from `origin/develop` on `feature/{workItemId}` or `bug/{workItemId}` when an Azure Work Item is linked. Agent3 completion moves the request to PR Ready, then the App discovers and tracks the active Azure PR before the request is marked PR Created / Tracked.
+- `draft_pr`: the default team delivery mode. Agent2 works from `origin/develop` on `feature/{workItemId}`, `bug/{workItemId}`, or `hotfix/{workItemId}` when a verified Azure Work Item is linked. Agent3 completion moves the request to PR Ready, then the App discovers and tracks the active Azure PR before the request is marked PR Created / Tracked.
 - `no_pr`: for personal project changes or work that does not need PR publication. Agent0 through Agent3 still run, Agent3 still reviews the result, and the App marks the request delivered after Agent3 completes.
 
 The workflow does not create, merge, abandon, approve, deploy, or update Azure PRs. It prepares and pushes the request branch, then reads Azure Repos to track the PR that appears for that branch.
@@ -168,7 +172,7 @@ Request Intake captures a user's request as intake evidence before an Agent thre
 
 The normal user-facing input is only the request text. The App shows a provisional preview, then local Codex returns the workflow interpretation:
 
-- Request kind: `REQ`, `BUG`, `REF`, `DOC`, or `OPS`.
+- Request kind: `REQ`, `BUG`, `HOTFIX`, `REF`, `DOC`, or `OPS`.
 - Request title.
 - Task Level.
 - Missing source signals.
@@ -224,9 +228,11 @@ Testing-stage write policy:
 
 Formal PR delivery branch policy:
 
-- Team delivery branches are `feature/{workItemId}` or `bug/{workItemId}`.
+- Team delivery branches are `feature/{workItemId}`, `bug/{workItemId}`, or `hotfix/{workItemId}`.
 - The target/base branch is `develop`.
 - These branches are used for local git commit/push and Azure PR discovery. They do not allow the App to merge, abandon, approve, deploy, or mutate Work Item fields.
+- The `{workItemId}` must come from a verified Azure Work Item read. A number parsed only from request text is a tracking reference and must not derive the formal PR branch.
+- Branch names use only the kind and Work Item number. Do not add title, slug, date, or other suffixes.
 
 Allowed MVP writes:
 
@@ -284,8 +290,10 @@ Formal team branches:
 
 - `feature/{workItemId}`
 - `bug/{workItemId}`
+- `hotfix/{workItemId}`
 
 These are treated as request delivery branches that target `develop` and are used for automatic PR discovery, not Azure PR creation.
+`hotfix/{workItemId}` is recognized for branch naming, but its production release target policy remains pending until the release flow is finalized.
 
 ## Agent Packet
 

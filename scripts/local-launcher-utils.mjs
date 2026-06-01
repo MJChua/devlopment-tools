@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -6,8 +7,9 @@ export const LOCAL_LAUNCHER_HOST = "127.0.0.1";
 export const LOCAL_LAUNCHER_PORT = Number(
   process.env.CODEX_MISSION_CONTROL_LAUNCHER_PORT || 17320,
 );
-export const LOCAL_LAUNCHER_VERSION = "0.1.0";
+export const LOCAL_LAUNCHER_VERSION = "0.2.0";
 export const LOCAL_LAUNCHER_TASK_NAME = "CodexMissionControlLocalLauncher";
+export const WORKER_MANIFEST_FILE = "worker-manifest.json";
 
 const defaultDevOrigins = ["http://localhost:3000", "http://127.0.0.1:3000"];
 
@@ -161,6 +163,16 @@ export function buildWorkerEnvironment(profile) {
     WORKER_ID: profile.workerId,
     WORKER_TOKEN: profile.token,
     CODEX_SANDBOX_MODE: profile.sandboxMode,
+    CONTROL_PLANE_LAUNCHER_VERSION: LOCAL_LAUNCHER_VERSION,
+    ...(profile.workerVersion
+      ? { CONTROL_PLANE_WORKER_VERSION: profile.workerVersion }
+      : {}),
+    ...(profile.workerScriptHash
+      ? { CONTROL_PLANE_WORKER_SCRIPT_HASH: profile.workerScriptHash }
+      : {}),
+    ...(profile.workerUpdatedAt
+      ? { CONTROL_PLANE_WORKER_UPDATED_AT: profile.workerUpdatedAt }
+      : {}),
     ...(profile.repoPath ? { REPO_PATH: profile.repoPath } : {}),
     ...(profile.azurePat ? { AZURE_DEVOPS_PAT: profile.azurePat } : {}),
     ...(profile.autoCommitAndPr ? { CONTROL_PLANE_AUTO_COMMIT_PR: "1" } : {}),
@@ -178,6 +190,9 @@ export function redactProfile(profile) {
     autoCommitAndPr: profile.autoCommitAndPr,
     hasAzurePat: Boolean(profile.azurePat),
     workerPid: profile.workerPid || 0,
+    workerVersion: profile.workerVersion || "",
+    workerScriptHash: profile.workerScriptHash || "",
+    workerUpdatedAt: profile.workerUpdatedAt || "",
     connectedAt: profile.connectedAt,
     updatedAt: profile.updatedAt,
   };
@@ -205,6 +220,54 @@ export function buildControlPlaneAzureRequestBody(payload, profile) {
     ...rest,
     credentials: { pat: profile.azurePat },
   };
+}
+
+export function normalizeWorkerBootstrapManifest(value) {
+  const input = value && typeof value === "object" ? value : {};
+  const workerVersion = optionalString(input.workerVersion);
+  const files = Array.isArray(input.files)
+    ? input.files
+        .map((file) => ({
+          name: optionalString(file?.name),
+          sha256: optionalString(file?.sha256).toLowerCase(),
+          bytes: Number(file?.bytes || 0),
+        }))
+        .filter((file) => file.name && /^[a-f0-9]{64}$/.test(file.sha256))
+    : [];
+
+  if (!workerVersion || files.length === 0) {
+    throw new Error("Worker manifest is invalid.");
+  }
+
+  return { workerVersion, files };
+}
+
+export function getWorkerManifestFile(manifest, fileName) {
+  return manifest.files.find((file) => file.name === fileName) || null;
+}
+
+export function hashWorkerFileContent(content) {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+export function applyWorkerManifestToProfile(profile, manifest) {
+  const workerFile = getWorkerManifestFile(manifest, "local-worker.mjs");
+  return {
+    ...profile,
+    workerVersion: manifest.workerVersion,
+    workerScriptHash: workerFile?.sha256 || "",
+    workerUpdatedAt: new Date().toISOString(),
+  };
+}
+
+export function isWorkerManifestCurrent(profile, manifest) {
+  const workerFile = getWorkerManifestFile(manifest, "local-worker.mjs");
+  return Boolean(
+    profile?.workerVersion &&
+      profile.workerScriptHash &&
+      profile.workerVersion === manifest.workerVersion &&
+      workerFile?.sha256 === profile.workerScriptHash,
+  );
 }
 
 export async function saveLauncherProfile(

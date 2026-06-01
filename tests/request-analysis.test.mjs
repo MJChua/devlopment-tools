@@ -34,6 +34,15 @@ test("request analysis still asks for external contracts for API changes", () =>
   assert(!analysis.missingSources.includes("QA TestCase or provisional verification checklist"));
 });
 
+test("request analysis classifies explicit hotfix requests", () => {
+  const analysis = analyzeNaturalLanguageRequest(
+    "Hotfix Work Item 390: urgent production fix for login screen crash.",
+  );
+
+  assert.equal(analysis.kind, "HOTFIX");
+  assert.equal(analysis.taskLevel, "Level 1");
+});
+
 test("request analysis extracts worker/Codex interpretation markers", () => {
   const analysis = extractWorkerInterpretationFromText(
     [

@@ -2,7 +2,14 @@ export const REQUEST_INTAKE_STORAGE_KEY =
   "azure-ai-control-plane.requestIntake";
 export const MAX_REQUEST_INTAKE_RECORDS = 20;
 
-export const REQUEST_KINDS = ["REQ", "BUG", "REF", "DOC", "OPS"] as const;
+export const REQUEST_KINDS = [
+  "REQ",
+  "BUG",
+  "HOTFIX",
+  "REF",
+  "DOC",
+  "OPS",
+] as const;
 export const TASK_LEVELS = [
   "Level 0",
   "Level 1",

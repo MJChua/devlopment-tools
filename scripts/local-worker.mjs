@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
@@ -24,6 +26,11 @@ const codexInstallCommand =
 const codexLoginCommand =
   process.env.CODEX_LOGIN_COMMAND || DEFAULT_CODEX_LOGIN_COMMAND;
 const autoCommitAndPr = process.env.CONTROL_PLANE_AUTO_COMMIT_PR === "1";
+const workerVersion = process.env.CONTROL_PLANE_WORKER_VERSION || "";
+const expectedWorkerScriptHash =
+  process.env.CONTROL_PLANE_WORKER_SCRIPT_HASH || "";
+const launcherVersion = process.env.CONTROL_PLANE_LAUNCHER_VERSION || "";
+const workerUpdatedAt = process.env.CONTROL_PLANE_WORKER_UPDATED_AT || "";
 const intervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS || 5000);
 const once = process.argv.includes("--once");
 const setupOnly = process.argv.includes("--setup-only");
@@ -35,8 +42,20 @@ const skippedRepositoryScanDirs = new Set([
   "AppData",
   "node_modules",
 ]);
+let currentWorkerScriptHash = "";
 
 async function main() {
+  currentWorkerScriptHash = await computeCurrentWorkerScriptHash().catch(() => "");
+  if (
+    expectedWorkerScriptHash &&
+    currentWorkerScriptHash &&
+    expectedWorkerScriptHash !== currentWorkerScriptHash
+  ) {
+    throw new Error(
+      `Worker script integrity mismatch. Expected ${expectedWorkerScriptHash}, got ${currentWorkerScriptHash}.`,
+    );
+  }
+
   console.log(`[worker:${workerId}] polling ${controlPlaneUrl}`);
   if (setupOnly) {
     await setupCodexCli();
@@ -93,6 +112,7 @@ async function executeRun(run) {
     progressDetail: progress.detail,
     progressUpdatedAt: progress.updatedAt,
     executionRepoPath: progress.executionRepoPath,
+    runtime: getWorkerRuntimeReport(),
   });
   const setProgress = (label, detail = "") => {
     progress.label = label;
@@ -172,10 +192,11 @@ async function executeRun(run) {
 
     console.log(`[worker:${workerId}] completed ${run.runId}`);
   } catch (error) {
+    const blockedError = formatBlockedWorkerError(error);
     await postJson(`/api/workers/runs/${run.runId}/complete`, {
       status: "blocked",
-      error: formatError(error),
-      artifact: `# Worker Blocked\n\n${formatError(error)}`,
+      error: blockedError,
+      artifact: `# Worker Blocked\n\n${blockedError}`,
       diffSummary: await collectDiffSummary(runRepoPath || process.cwd()).catch(
         () => "",
       ),
@@ -236,10 +257,20 @@ async function reportRepositoryCandidates() {
   await postJson("/api/workers/repositories", {
     repositories,
     ...readiness,
+    runtime: getWorkerRuntimeReport(),
   });
   console.log(
     `[worker:${workerId}] reported ${repositories.length} repository candidate(s); Codex ${readiness.codexStatus}`,
   );
+}
+
+function getWorkerRuntimeReport() {
+  return {
+    workerVersion,
+    workerScriptHash: currentWorkerScriptHash || "",
+    launcherVersion,
+    workerUpdatedAt,
+  };
 }
 
 async function setupCodexCli() {
@@ -494,7 +525,7 @@ async function prepareExecutionRepository(run, repoPath, progress) {
     trace.sourceBranch || `codex/${sanitizeBranchSegment(run.requestId)}`;
   if (autoCommitAndPr && !trace.sourceBranch) {
     throw new Error(
-      "Cannot prepare the team PR branch because this draft PR request has no Azure Work Item number. Link an Azure Work Item so the worker can use feature/{id} or bug/{id}.",
+      "Cannot prepare the team PR branch because this draft PR request has no verified Azure Work Item. Verify an Azure Work Item so the worker can use feature/{id}, bug/{id}, or hotfix/{id}.",
     );
   }
   const baseRef = await resolveWorktreeBaseRef(repoPath, Boolean(trace.sourceBranch));
@@ -639,7 +670,9 @@ function buildTeamPrCommitMessage(run, trace) {
     "本次需求調整";
   const verb = trace.branchKind === "bug" || requestKind === "BUG" ? "修正" : "調整";
   const normalizedSummary = summary.replace(/\s+/g, " ").trim();
-  return `#${trace.workItemId} ${verb} ${normalizedSummary}`.slice(0, 120);
+  return `#${trace.workItemId} ${
+    trace.branchKind === "hotfix" || requestKind === "HOTFIX" ? "fix" : verb
+  } ${normalizedSummary}`.slice(0, 120);
 }
 
 function escapeRegExp(value) {
@@ -816,7 +849,7 @@ async function finalizeTeamPrDelivery(run, repoPath, progress) {
   const trace = getRunPrDeliveryTrace(run);
   if (!trace.sourceBranch) {
     throw new Error(
-      "Cannot commit and push the PR branch because the Agent packet does not contain a feature/{id} or bug/{id} source branch.",
+      "Cannot commit and push the PR branch because the Agent packet does not contain a feature/{id}, bug/{id}, or hotfix/{id} source branch.",
     );
   }
 
@@ -946,6 +979,37 @@ function requiredEnv(name) {
   }
 
   return value;
+}
+
+async function computeCurrentWorkerScriptHash() {
+  const content = await readFile(fileURLToPath(import.meta.url));
+  return createHash("sha256").update(content).digest("hex");
+}
+
+function formatBlockedWorkerError(error) {
+  const message = formatError(error);
+  if (isWorkerRuntimeError(error, message)) {
+    return `worker_runtime_error: 本機背景 Worker 版本不同步或執行環境異常，請重新下載並重啟 Worker。原始錯誤：${message}`;
+  }
+
+  if (isRepoDirtyError(message)) {
+    return `repo_dirty_blocked: 本機 repo 目前有未提交異動或分支衝突。${message}`;
+  }
+
+  return message;
+}
+
+function isWorkerRuntimeError(error, message) {
+  return (
+    error instanceof ReferenceError ||
+    /is not defined|worker script integrity mismatch|worker version/i.test(message)
+  );
+}
+
+function isRepoDirtyError(message) {
+  return /working tree is not clean|repo is not clean|uncommitted changes|unresolved merge conflict|merge conflict/i.test(
+    message,
+  );
 }
 
 function formatError(error) {

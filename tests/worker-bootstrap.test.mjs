@@ -37,6 +37,34 @@ test("worker bootstrap serves local launcher scripts", async () => {
   assert.match(body, /sendJson\(response, 500, \{ ok: false, error: formatError\(error\) \}, corsHeaders\)/);
 });
 
+test("worker bootstrap serves a hash manifest for worker scripts", async () => {
+  const response = await GET(
+    new Request(
+      "http://localhost:3000/api/workers/bootstrap?file=worker-manifest.json",
+    ),
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.match(body.workerVersion, /^\d{4}\.\d{2}\.\d{2}\./);
+  assert.equal(
+    body.files.some(
+      (file) =>
+        file.name === "local-worker.mjs" && /^[a-f0-9]{64}$/.test(file.sha256),
+    ),
+    true,
+  );
+  assert.equal(
+    body.files.some(
+      (file) =>
+        file.name === "local-worker-utils.mjs" &&
+        /^[a-f0-9]{64}$/.test(file.sha256),
+    ),
+    true,
+  );
+});
+
 test("worker bootstrap rejects unknown files", async () => {
   const response = await GET(
     new Request("http://localhost:3000/api/workers/bootstrap?file=secret.env"),

@@ -1,6 +1,6 @@
 export const TEST_WRITE_BRANCH_PREFIX = "AITraining/";
 export const TEAM_PR_BASE_BRANCH = "develop";
-export const TEAM_PR_BRANCH_PREFIXES = ["feature", "bug"] as const;
+export const TEAM_PR_BRANCH_PREFIXES = ["feature", "bug", "hotfix"] as const;
 export type TeamPrBranchKind = (typeof TEAM_PR_BRANCH_PREFIXES)[number];
 
 export function normalizeBranchName(branchOrRef: string) {
@@ -18,7 +18,7 @@ export function getTestWritePolicyMessage(branchOrRef: string) {
 
 export function isTeamPrDeliveryBranch(branchOrRef: string) {
   const branch = normalizeBranchName(branchOrRef);
-  return /^(feature|bug)\/\d+$/.test(branch);
+  return /^(feature|bug|hotfix)\/\d+$/.test(branch);
 }
 
 export function isTeamPrDeliveryTargetBranch(branchOrRef: string) {
@@ -45,10 +45,14 @@ export function getTeamPrBranchKind(input: {
 }): TeamPrBranchKind {
   const workItemType = input.workItemType?.trim().toLowerCase() ?? "";
   const requestKind = input.requestKind?.trim().toUpperCase() ?? "";
+  if (workItemType === "hotfix" || requestKind === "HOTFIX") {
+    return "hotfix";
+  }
+
   return workItemType === "bug" || requestKind === "BUG" ? "bug" : "feature";
 }
 
 export function getTeamPrDeliveryPolicyMessage(branchOrRef: string) {
   const branch = normalizeBranchName(branchOrRef);
-  return `Formal PR delivery branches must be feature/{workItemId} or bug/{workItemId} targeting ${TEAM_PR_BASE_BRANCH}. "${branch}" is not a formal delivery branch.`;
+  return `Formal PR delivery branches must be feature/{workItemId}, bug/{workItemId}, or hotfix/{workItemId} targeting ${TEAM_PR_BASE_BRANCH}. "${branch}" is not a formal delivery branch.`;
 }

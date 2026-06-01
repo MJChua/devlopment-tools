@@ -340,6 +340,88 @@ test("draft PR packet derives team branch trace from Azure Work Item", () => {
   assert.match(packet, /App will discover and track the active Azure PR automatically/);
 });
 
+test("draft PR branch trace requires verified Work Item evidence", () => {
+  const trackingRequest = sampleRequest({
+    azureReferenceId: "390",
+    azureReferenceEvidence: {
+      status: "tracking",
+      referenceType: "work-item",
+      referenceId: "390",
+      checkedAt: "2026-05-28T03:00:00.000Z",
+      title: "",
+      workItemType: "",
+      workItemState: "",
+      assignedTo: "",
+      areaPath: "",
+      iterationPath: "",
+      webUrl: "",
+      summary: "",
+      error: "",
+    },
+  });
+  const trace = getPrDeliveryTraceForRequest(trackingRequest);
+  const packet = buildWorkflowAgentPacket(trackingRequest, "agent2", [
+    sampleRun({
+      agentRole: "agent1",
+      status: "completed",
+      artifact: completeAgent1Artifact(),
+    }),
+  ]);
+
+  assert.equal(trace.sourceBranch, "");
+  assert.equal(trace.workItemId, "");
+  assert.match(trace.reason, /verified Azure Work Item/);
+  assert.match(packet, /PR Delivery Source Branch: \(pending work item\)/);
+  assert.doesNotMatch(packet, /feature\/390|bug\/390|hotfix\/390/);
+});
+
+test("draft PR packet can derive hotfix branch from verified Work Item", () => {
+  const hotfixRequest = sampleRequest({
+    kind: "HOTFIX",
+    azureReferenceId: "390",
+    azureReferenceEvidence: {
+      status: "verified",
+      referenceType: "work-item",
+      referenceId: "390",
+      checkedAt: "2026-05-28T03:00:00.000Z",
+      title: "Production login fix",
+      workItemType: "Bug",
+      workItemState: "Active",
+      assignedTo: "QA",
+      areaPath: "Project",
+      iterationPath: "Project\\Sprint 1",
+      webUrl: "https://dev.azure.com/org/project/_workitems/edit/390",
+      summary: "Production login fix",
+      error: "",
+    },
+  });
+  const trace = getPrDeliveryTraceForRequest(hotfixRequest);
+
+  assert.equal(trace.sourceBranch, "hotfix/390");
+  assert.equal(trace.branchKind, "hotfix");
+  assert.equal(trace.workItemId, "390");
+});
+
+test("workflow blocks Agent2 dispatch until draft PR Work Item is verified", () => {
+  const stageGate = evaluateWorkflowStageGate({
+    request: sampleRequest({ status: "ready_for_implementation" }),
+    runs: [
+      sampleRun({
+        agentRole: "agent1",
+        status: "completed",
+        artifact: completeAgent1Artifact(),
+      }),
+    ],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(stageGate.status, "human-decision");
+  assert.equal(stageGate.needsClarification, true);
+  assert.match(stageGate.summary, /verified Azure Work Item/);
+  assert.match(stageGate.blockers.join("\n"), /verified Azure Work Item/);
+});
+
 test("UI-only visual evidence mode narrows Agent1 source requirements", () => {
   const packet = buildWorkflowAgentPacket(
     sampleRequest({
@@ -420,6 +502,31 @@ test("blocker summaries dedupe repeated fallback blockers", () => {
       .filter((item) => item.includes("unknown blocker A")).length,
     1,
   );
+});
+
+test("blocker summaries explain worker runtime and dirty repo blockers", () => {
+  const summaries = summarizeStageGateBlockers([
+    "worker_runtime_error: 本機背景 Worker 版本不同步或執行環境異常，請重新下載並重啟 Worker。原始錯誤：ReferenceError: finalizeTeamPrDelivery is not defined",
+    "repo_dirty_blocked: 本機 repo 目前有未提交異動或分支衝突。Cannot prepare the request branch because the selected repo has uncommitted changes.",
+  ]);
+
+  assert.deepEqual(
+    summaries.map((summary) => summary.title),
+    ["本機 Worker 版本不同步", "本機 repo 狀態不乾淨"],
+  );
+  assert.match(summaries[0].nextAction, /重新下載並重啟 Worker/);
+  assert.match(summaries[1].nextAction, /commit、stash/);
+});
+
+test("blocker summaries explain verified Work Item branch requirements", () => {
+  const summaries = summarizeStageGateBlockers([
+    "Draft PR branch preparation requires a verified Azure Work Item.",
+  ]);
+
+  assert.equal(summaries.length, 1);
+  assert.equal(summaries[0].title, "Azure 單號尚未驗證");
+  assert.match(summaries[0].reason, /tracking reference/);
+  assert.match(summaries[0].nextAction, /Azure Work Item/);
 });
 
 test("blocker summaries merge UI-only target and expectation gaps", () => {
@@ -572,7 +679,10 @@ test("workflow stage gate ignores blockers superseded by recovery runs", () => {
     artifact: "# Source Check Report\n\n## Confirmed Requirements\n- ok",
   });
   const stageGate = evaluateWorkflowStageGate({
-    request: sampleRequest({ status: "ready_for_implementation" }),
+    request: sampleRequest({
+      status: "ready_for_implementation",
+      azureReferenceEvidence: verifiedWorkItemEvidence("795"),
+    }),
     runs: [blockedRun, recoveryRun],
     prLinks: [],
     auditEvents: [],
@@ -601,6 +711,48 @@ test("workflow stage gate marks stale running run without enabling duplicate dis
   assert.equal(stageGate.recoveryKind, "stale_run");
   assert.equal(stageGate.blockedRunId, staleRun.runId);
   assert.equal(stageGate.canManualRetry, false);
+});
+
+test("workflow stage gate separates worker runtime errors from Agent blockers", () => {
+  const blockedRun = sampleRun({
+    runId: "agent0-worker-runtime",
+    agentRole: "agent0",
+    status: "blocked",
+    error:
+      "worker_runtime_error: 本機背景 Worker 版本不同步或執行環境異常，請重新下載並重啟 Worker。原始錯誤：ReferenceError: finalizeTeamPrDelivery is not defined",
+  });
+  const stageGate = evaluateWorkflowStageGate({
+    request: sampleRequest({ status: "blocked" }),
+    runs: [blockedRun],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(stageGate.status, "blocked");
+  assert.equal(stageGate.recoveryKind, "worker_runtime_error");
+  assert.equal(stageGate.needsClarification, false);
+  assert.match(stageGate.blockers[0], /Worker 版本不同步/);
+});
+
+test("workflow stage gate separates dirty repo blockers", () => {
+  const blockedRun = sampleRun({
+    runId: "agent2-dirty-repo",
+    agentRole: "agent2",
+    status: "blocked",
+    error:
+      "repo_dirty_blocked: 本機 repo 目前有未提交異動或分支衝突。Cannot prepare the request branch because the selected repo has uncommitted changes.",
+  });
+  const stageGate = evaluateWorkflowStageGate({
+    request: sampleRequest({ status: "blocked" }),
+    runs: [blockedRun],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(stageGate.status, "blocked");
+  assert.equal(stageGate.recoveryKind, "repo_dirty_blocked");
+  assert.equal(stageGate.needsClarification, false);
+  assert.match(stageGate.blockers[0], /未提交異動/);
 });
 
 test("workflow waits for Local Worker/Codex interpretation before high-risk stop", () => {
@@ -853,6 +1005,25 @@ function sampleRequest(overrides = {}) {
       },
       new Date(2026, 4, 25, 14, 30),
     ),
+    ...overrides,
+  };
+}
+
+function verifiedWorkItemEvidence(referenceId, overrides = {}) {
+  return {
+    status: "verified",
+    referenceType: "work-item",
+    referenceId,
+    checkedAt: "2026-05-28T03:00:00.000Z",
+    title: `Verified Work Item ${referenceId}`,
+    workItemType: "Feature",
+    workItemState: "Active",
+    assignedTo: "QA",
+    areaPath: "Project",
+    iterationPath: "Project\\Sprint 1",
+    webUrl: `https://dev.azure.com/org/project/_workitems/edit/${referenceId}`,
+    summary: `Verified Work Item ${referenceId}`,
+    error: "",
     ...overrides,
   };
 }

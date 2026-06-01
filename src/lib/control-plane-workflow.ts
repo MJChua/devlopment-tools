@@ -85,6 +85,8 @@ export type StageGateRecoveryKind =
   | "handoff_schema"
   | "agent_failed"
   | "agent_blocked"
+  | "worker_runtime_error"
+  | "repo_dirty_blocked"
   | "stale_run"
   | "human_decision";
 export type ClarificationPromptOption = {
@@ -218,6 +220,14 @@ export type WorkerRegistration = {
     | "cli-command-failed";
   codexExecutablePath: string;
   codexCheckedAt: string | null;
+  workerVersion: string;
+  workerScriptHash: string;
+  workerExpectedVersion: string;
+  workerExpectedScriptHash: string;
+  workerVersionStatus: "unknown" | "current" | "mismatch";
+  launcherVersion: string;
+  workerUpdatedAt: string | null;
+  workerVersionCheckedAt: string | null;
   readinessCheckRequestedAt: string | null;
   codexSetupRequestedAt: string | null;
   repositoryCandidates: RepositoryCandidate[];
@@ -498,6 +508,12 @@ export function getPrDeliveryTraceForRequest(
   }
 
   const workItemId = request.azureReferenceId.trim();
+  if (!isVerifiedWorkItemReference(request, workItemId)) {
+    return emptyPrDeliveryTrace(
+      "Draft PR delivery needs a verified Azure Work Item before deriving a formal request branch.",
+    );
+  }
+
   const branchKind = getTeamPrBranchKind({
     workItemType: request.azureReferenceEvidence.workItemType,
     requestKind: request.kind,
@@ -519,6 +535,22 @@ export function getPrDeliveryTraceForRequest(
   };
 }
 
+function isVerifiedWorkItemReference(
+  request: Pick<
+    WorkflowRequest,
+    "azureReferenceType" | "azureReferenceId" | "azureReferenceEvidence"
+  >,
+  workItemId = request.azureReferenceId.trim(),
+) {
+  return (
+    request.azureReferenceType === "work-item" &&
+    /^\d+$/.test(workItemId) &&
+    request.azureReferenceEvidence.status === "verified" &&
+    request.azureReferenceEvidence.referenceType === "work-item" &&
+    request.azureReferenceEvidence.referenceId.trim() === workItemId
+  );
+}
+
 export function normalizePrDeliveryTrace(value: unknown): PrDeliveryTrace | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -530,7 +562,9 @@ export function normalizePrDeliveryTrace(value: unknown): PrDeliveryTrace | null
   const sourceBranch = requireOptionalTrimmed(input.sourceBranch);
   const workItemId = requireOptionalTrimmed(input.workItemId);
   const branchKind =
-    input.branchKind === "feature" || input.branchKind === "bug"
+    input.branchKind === "feature" ||
+    input.branchKind === "bug" ||
+    input.branchKind === "hotfix"
       ? input.branchKind
       : "";
   const discoveryStatus = normalizePrDiscoveryStatus(input.discoveryStatus);
@@ -1882,6 +1916,29 @@ export function isHandoffSchemaRun(run: Pick<WorkerRun, "error">) {
   return run.error.startsWith("Agent handoff is incomplete.");
 }
 
+export function isWorkerRuntimeErrorRun(run: Pick<WorkerRun, "error" | "artifact">) {
+  const text = `${run.error}\n${run.artifact}`.toLowerCase();
+  return (
+    text.includes("worker_runtime_error") ||
+    text.includes("referenceerror") ||
+    text.includes("is not defined") ||
+    text.includes("本機背景 worker 版本不同步") ||
+    text.includes("worker version")
+  );
+}
+
+export function isRepoDirtyBlockedRun(run: Pick<WorkerRun, "error" | "artifact">) {
+  const text = `${run.error}\n${run.artifact}`.toLowerCase();
+  return (
+    text.includes("repo_dirty_blocked") ||
+    text.includes("working tree is not clean") ||
+    text.includes("repo is not clean") ||
+    text.includes("uncommitted changes") ||
+    text.includes("本機 repo 目前有未提交異動") ||
+    text.includes("merge conflict")
+  );
+}
+
 export function isRunHeartbeatStale(
   run: Pick<WorkerRun, "updatedAt">,
   now = Date.now(),
@@ -1923,9 +1980,19 @@ export function evaluateWorkflowStageGate(
   }
 
   if (failedRun) {
-    blockers.push(
-      `${formatAgentRole(failedRun.agentRole)} reported ${failedRun.status}: ${failedRun.error || "no error detail returned"}`,
-    );
+    if (isWorkerRuntimeErrorRun(failedRun)) {
+      blockers.push(
+        "本機背景 Worker 版本不同步或執行環境異常，請重新下載並重啟 Worker。",
+      );
+    } else if (isRepoDirtyBlockedRun(failedRun)) {
+      blockers.push(
+        `本機 repo 目前有未提交異動或分支衝突：${failedRun.error || "請先處理工作區狀態。"}`,
+      );
+    } else {
+      blockers.push(
+        `${formatAgentRole(failedRun.agentRole)} reported ${failedRun.status}: ${failedRun.error || "no error detail returned"}`,
+      );
+    }
   }
 
   if (openRun) {
@@ -1977,6 +2044,32 @@ export function evaluateWorkflowStageGate(
     });
   }
 
+  const nextAgent = getNextAgentRole(request, runs);
+  if (nextAgent === "agent2" && request.deliveryMode === "draft_pr") {
+    const prTrace = getPrDeliveryTraceForRequest(request);
+    if (!prTrace.sourceBranch) {
+      blockers.push(
+        "Draft PR branch preparation requires a verified Azure Work Item.",
+      );
+      return stageGateResult({
+        status: "human-decision",
+        label: "Verified Azure Work Item required",
+        summary:
+          "The workflow needs a verified Azure Work Item before preparing the formal PR branch.",
+        blockers,
+        nextActions: [
+          "Select or verify an Azure Work Item, then rerun the same workflow step.",
+        ],
+        humanDecisions: [
+          prTrace.reason ||
+            "Draft PR delivery needs a verified Azure Work Item before deriving a formal request branch.",
+        ],
+        recoveryKind: "human_decision",
+        needsClarification: true,
+      });
+    }
+  }
+
   if (request.status === "pr_ready") {
     humanDecisions.push(
       "Review Agent3 delivery artifact and track the Azure PR that appears for the pushed request branch.",
@@ -1995,7 +2088,6 @@ export function evaluateWorkflowStageGate(
     });
   }
 
-  const nextAgent = getNextAgentRole(request, runs);
   if (nextAgent) {
     nextActions.push(`Dispatch ${formatAgentRole(nextAgent)} to the assigned Local Worker.`);
   }
@@ -2009,6 +2101,10 @@ export function evaluateWorkflowStageGate(
               run.dispatchReason === "auto_repair",
           ) && failedRun.dispatchReason !== "auto_repair"
         : false;
+    const workerRuntimeError = failedRun
+      ? isWorkerRuntimeErrorRun(failedRun)
+      : false;
+    const repoDirtyBlocked = failedRun ? isRepoDirtyBlockedRun(failedRun) : false;
     const clarificationPrompt = failedRun
       ? extractClarificationPromptFromArtifact(failedRun.artifact)
       : null;
@@ -2024,13 +2120,22 @@ export function evaluateWorkflowStageGate(
       recoveryKind: failedRun
         ? isHandoffSchemaRun(failedRun)
           ? "handoff_schema"
-          : failedRun.status === "failed"
-            ? "agent_failed"
-            : "agent_blocked"
+          : workerRuntimeError
+            ? "worker_runtime_error"
+            : repoDirtyBlocked
+              ? "repo_dirty_blocked"
+              : failedRun.status === "failed"
+                ? "agent_failed"
+                : "agent_blocked"
         : "none",
       canAutoRepair,
       canManualRetry: Boolean(failedRun),
-      needsClarification: Boolean(failedRun && !isHandoffSchemaRun(failedRun)),
+      needsClarification: Boolean(
+        failedRun &&
+          !isHandoffSchemaRun(failedRun) &&
+          !workerRuntimeError &&
+          !repoDirtyBlocked,
+      ),
       clarificationPrompt,
     });
   }
@@ -2173,7 +2278,7 @@ function formatDeliveryModeGuidance(deliveryMode: DeliveryMode) {
 
   return [
     "- This request is expected to end at PR Ready after Agent3 review.",
-    `- Team PR flow uses ${TEAM_PR_BASE_BRANCH} as the base branch and a source branch derived from the Azure Work Item, such as feature/{id} or bug/{id}.`,
+    `- Team PR flow uses ${TEAM_PR_BASE_BRANCH} as the base branch and a source branch derived from a verified Azure Work Item, such as feature/{id}, bug/{id}, or hotfix/{id}.`,
     "- Do not create, merge, abandon, approve, deploy, or update an Azure PR from the Agent.",
     "- After the request branch is committed and pushed, the App will discover and track the active Azure PR automatically.",
   ].join("\n");
@@ -2268,12 +2373,18 @@ export function normalizeAzureReferenceEvidence(
   }
 
   const record = value as Record<string, unknown>;
-  const status = normalizeAzureReferenceEvidenceStatus(record.status);
+  const evidenceReferenceId =
+    requireOptionalTrimmed(record.referenceId) || referenceId;
+  const status = normalizeAzureReferenceEvidenceStatus(
+    record.status,
+    evidenceReferenceId,
+    referenceId,
+  );
   return {
     ...base,
     status,
+    referenceId: evidenceReferenceId,
     referenceType,
-    referenceId,
     checkedAt: requireOptionalTrimmed(record.checkedAt),
     title: requireOptionalTrimmed(record.title),
     workItemType: requireOptionalTrimmed(record.workItemType),
@@ -2289,8 +2400,19 @@ export function normalizeAzureReferenceEvidence(
 
 function normalizeAzureReferenceEvidenceStatus(
   value: unknown,
+  evidenceReferenceId = "",
+  referenceId = "",
 ): AzureReferenceEvidenceStatus {
   if (value === "verified" || value === "unverified") {
+    if (
+      value === "verified" &&
+      evidenceReferenceId &&
+      referenceId &&
+      evidenceReferenceId !== referenceId
+    ) {
+      return "unverified";
+    }
+
     return value;
   }
 

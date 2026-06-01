@@ -41,6 +41,21 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
   const normalized = original.toLowerCase();
 
   if (
+    normalized.includes("verified azure work item") ||
+    (normalized.includes("formal pr branch") &&
+      normalized.includes("azure work item"))
+  ) {
+    return {
+      title: "Azure 單號尚未驗證",
+      reason:
+        "Draft PR 分支只能使用已讀取並確認的 Azure Work Item；文字中解析出的單號只能當 tracking reference。",
+      nextAction:
+        "選取可讀取的 Azure Work Item，或修正 Azure 權限後重跑同一流程。",
+      original,
+    };
+  }
+
+  if (
     normalized.includes("azure work item") &&
     (normalized.includes("not confirmed") ||
       normalized.includes("tracking") ||
@@ -67,6 +82,38 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
         "下一個 Agent 需要結構化 handoff 才能安全接續；缺欄位時不能猜測 scope 或來源。",
       nextAction:
         "先使用「重新同步 Agent 輸出」；若仍缺欄位，再重跑同一個 Agent。",
+      original,
+    };
+  }
+
+  if (
+    normalized.includes("worker_runtime_error") ||
+    normalized.includes("worker 版本不同步") ||
+    normalized.includes("worker version") ||
+    normalized.includes("is not defined")
+  ) {
+    return {
+      title: "本機 Worker 版本不同步",
+      reason:
+        "App 已更新，但背景 worker 快取的腳本不是同一版，流程還沒進入真正的 Agent 判斷就先在 worker 內部錯誤中斷。",
+      nextAction:
+        "按「重新下載並重啟 Worker」，完成後重跑同一個 Agent，不需要重新輸入需求。",
+      original,
+    };
+  }
+
+  if (
+    normalized.includes("repo_dirty_blocked") ||
+    normalized.includes("uncommitted changes") ||
+    normalized.includes("本機 repo 目前有未提交異動") ||
+    normalized.includes("merge conflict")
+  ) {
+    return {
+      title: "本機 repo 狀態不乾淨",
+      reason:
+        "正式 PR 流程需要從乾淨分支開始，避免把其他需求或舊變更一起帶進這次 request。",
+      nextAction:
+        "先 commit、stash 或清掉不屬於本需求的異動；如果是 conflict，先解完再重跑同一個 Agent。",
       original,
     };
   }

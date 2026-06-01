@@ -50,8 +50,15 @@ import {
 } from "./request-analysis.ts";
 import { normalizeRequestInputTemplateId } from "./request-templates.ts";
 import { scanRepoCandidatesForAgent1 } from "./repo-candidate-scan.ts";
+import {
+  getWorkerBootstrapManifest,
+  getWorkerScriptHash,
+} from "./worker-bootstrap-manifest.ts";
 
-const DATA_DIR = path.join(process.cwd(), ".control-plane");
+const DATA_DIR = path.join(
+  /*turbopackIgnore: true*/ process.cwd(),
+  ".control-plane",
+);
 const DB_PATH =
   process.env.CONTROL_PLANE_DB_PATH ??
   path.join(DATA_DIR, "control-plane.sqlite");
@@ -75,6 +82,7 @@ export type WorkerRunHeartbeatInput = {
   progressDetail?: unknown;
   progressUpdatedAt?: unknown;
   executionRepoPath?: unknown;
+  runtime?: WorkerRuntimeInput;
 };
 
 export type RecoverWorkflowRequestInput = {
@@ -113,6 +121,13 @@ export type WorkerCodexReadinessInput = {
   codexDiagnosticCode?: unknown;
   codexExecutablePath?: unknown;
   codexCheckedAt?: unknown;
+};
+
+export type WorkerRuntimeInput = {
+  workerVersion?: unknown;
+  workerScriptHash?: unknown;
+  launcherVersion?: unknown;
+  workerUpdatedAt?: unknown;
 };
 
 export type RealtimeDigest = {
@@ -470,13 +485,20 @@ export function registerWorker(input: {
         codex_diagnostic_code,
         codex_executable_path,
         codex_checked_at,
+        worker_version,
+        worker_script_hash,
+        worker_expected_version,
+        worker_expected_script_hash,
+        launcher_version,
+        worker_updated_at,
+        worker_version_checked_at,
         readiness_check_requested_at,
         codex_setup_requested_at,
         status,
         last_seen_at,
         created_at,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'unknown', '', 'unknown', '', NULL, NULL, NULL, 'registered', NULL, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'unknown', '', 'unknown', '', NULL, '', '', '', '', '', NULL, NULL, NULL, NULL, 'registered', NULL, ?, ?)
       ON CONFLICT(worker_id) DO UPDATE SET
         display_name = excluded.display_name,
         repo_path = excluded.repo_path,
@@ -490,6 +512,13 @@ export function registerWorker(input: {
         codex_diagnostic_code = 'unknown',
         codex_executable_path = '',
         codex_checked_at = NULL,
+        worker_version = '',
+        worker_script_hash = '',
+        worker_expected_version = '',
+        worker_expected_script_hash = '',
+        launcher_version = '',
+        worker_updated_at = NULL,
+        worker_version_checked_at = NULL,
         readiness_check_requested_at = NULL,
         codex_setup_requested_at = NULL,
         status = 'registered',
@@ -558,6 +587,13 @@ export function stopWorker(workerId: string): WorkerRegistration {
            codex_diagnostic_code = 'unknown',
            codex_executable_path = '',
            codex_checked_at = NULL,
+           worker_version = '',
+           worker_script_hash = '',
+           worker_expected_version = '',
+           worker_expected_script_hash = '',
+           launcher_version = '',
+           worker_updated_at = NULL,
+           worker_version_checked_at = NULL,
            readiness_check_requested_at = NULL,
            codex_setup_requested_at = NULL,
            last_seen_at = NULL,
@@ -574,10 +610,12 @@ export function updateWorkerRepositoryCandidates(input: {
   token: string;
   repositories: WorkerRepositoryCandidateInput[];
   readiness?: WorkerCodexReadinessInput;
+  runtime?: WorkerRuntimeInput;
 }) {
   validateWorkerToken(input.workerId, input.token);
   const repositories = normalizeRepositoryCandidates(input.repositories);
   const readiness = normalizeWorkerCodexReadiness(input.readiness);
+  const runtime = normalizeWorkerRuntime(input.runtime);
   const now = new Date().toISOString();
 
   getDatabase()
@@ -591,6 +629,13 @@ export function updateWorkerRepositoryCandidates(input: {
            codex_diagnostic_code = ?,
            codex_executable_path = ?,
            codex_checked_at = ?,
+           worker_version = ?,
+           worker_script_hash = ?,
+           worker_expected_version = ?,
+           worker_expected_script_hash = ?,
+           launcher_version = ?,
+           worker_updated_at = ?,
+           worker_version_checked_at = ?,
            readiness_check_requested_at = NULL,
            status = 'active',
            last_seen_at = ?,
@@ -606,6 +651,13 @@ export function updateWorkerRepositoryCandidates(input: {
       readiness.codexDiagnosticCode,
       readiness.codexExecutablePath,
       readiness.codexCheckedAt,
+      runtime.workerVersion,
+      runtime.workerScriptHash,
+      runtime.workerExpectedVersion,
+      runtime.workerExpectedScriptHash,
+      runtime.launcherVersion,
+      runtime.workerUpdatedAt,
+      now,
       now,
       now,
       input.workerId,
@@ -674,6 +726,7 @@ export function dispatchNextAgent(input: {
         "Local Codex execution is not ready for this worker.",
     );
   }
+  assertWorkerRuntimeCurrent(worker);
   const agentRole = input.agentRole ?? getNextAgentRole(request, detail.runs);
   if (!agentRole) {
     throw new Error("No automatic next agent is available for this request.");
@@ -1302,6 +1355,7 @@ export function heartbeatWorkerRun(
   const progressDetail = normalizeProgressText(input.progressDetail, 500);
   const progressUpdatedAt = normalizeOptionalIsoTime(input.progressUpdatedAt) || now;
   const executionRepoPath = normalizeProgressText(input.executionRepoPath, 1000);
+  const runtime = normalizeWorkerRuntime(input.runtime);
   getDatabase()
     .prepare(
       progressLabel || progressDetail || executionRepoPath
@@ -1332,6 +1386,7 @@ export function heartbeatWorkerRun(
         : [now, runId]),
     );
   markWorkerSeen(workerId);
+  updateWorkerRuntime(workerId, runtime, now);
 
   return requireRun(runId);
 }
@@ -1997,6 +2052,13 @@ function getDatabase() {
       codex_diagnostic_code TEXT NOT NULL DEFAULT 'unknown',
       codex_executable_path TEXT NOT NULL DEFAULT '',
       codex_checked_at TEXT,
+      worker_version TEXT NOT NULL DEFAULT '',
+      worker_script_hash TEXT NOT NULL DEFAULT '',
+      worker_expected_version TEXT NOT NULL DEFAULT '',
+      worker_expected_script_hash TEXT NOT NULL DEFAULT '',
+      launcher_version TEXT NOT NULL DEFAULT '',
+      worker_updated_at TEXT,
+      worker_version_checked_at TEXT,
       readiness_check_requested_at TEXT,
       codex_setup_requested_at TEXT,
       repository_candidates_json TEXT NOT NULL DEFAULT '[]',
@@ -2171,6 +2233,13 @@ function getDatabase() {
     "TEXT NOT NULL DEFAULT ''",
   );
   ensureColumn(database, "workers", "codex_checked_at", "TEXT");
+  ensureColumn(database, "workers", "worker_version", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(database, "workers", "worker_script_hash", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(database, "workers", "worker_expected_version", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(database, "workers", "worker_expected_script_hash", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(database, "workers", "launcher_version", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(database, "workers", "worker_updated_at", "TEXT");
+  ensureColumn(database, "workers", "worker_version_checked_at", "TEXT");
   ensureColumn(database, "workers", "readiness_check_requested_at", "TEXT");
   ensureColumn(database, "workers", "codex_setup_requested_at", "TEXT");
   ensureColumn(database, "workflow_requests", "resume_snapshot_json", "TEXT NOT NULL DEFAULT '{}'");
@@ -2284,6 +2353,21 @@ function normalizeRequestEvidenceMode(
 
 function mapWorkerRow(row: unknown): WorkerRegistration {
   const value = row as Record<string, string | number | null>;
+  const expectedManifest = getWorkerBootstrapManifest();
+  const expectedVersion =
+    String(value.worker_expected_version ?? "") ||
+    expectedManifest.workerVersion;
+  const expectedScriptHash =
+    String(value.worker_expected_script_hash ?? "") ||
+    getWorkerScriptHash(expectedManifest);
+  const workerVersion = String(value.worker_version ?? "");
+  const workerScriptHash = String(value.worker_script_hash ?? "");
+  const workerVersionStatus =
+    workerVersion && workerScriptHash
+      ? workerVersion === expectedVersion && workerScriptHash === expectedScriptHash
+        ? "current"
+        : "mismatch"
+      : "unknown";
 
   return {
     workerId: String(value.worker_id),
@@ -2301,6 +2385,18 @@ function mapWorkerRow(row: unknown): WorkerRegistration {
     codexExecutablePath: String(value.codex_executable_path ?? ""),
     codexCheckedAt: value.codex_checked_at
       ? String(value.codex_checked_at)
+      : null,
+    workerVersion,
+    workerScriptHash,
+    workerExpectedVersion: expectedVersion,
+    workerExpectedScriptHash: expectedScriptHash,
+    workerVersionStatus,
+    launcherVersion: String(value.launcher_version ?? ""),
+    workerUpdatedAt: value.worker_updated_at
+      ? String(value.worker_updated_at)
+      : null,
+    workerVersionCheckedAt: value.worker_version_checked_at
+      ? String(value.worker_version_checked_at)
       : null,
     readinessCheckRequestedAt: value.readiness_check_requested_at
       ? String(value.readiness_check_requested_at)
@@ -2370,6 +2466,68 @@ function normalizeWorkerCodexReadiness(
         : "",
     codexCheckedAt,
   };
+}
+
+function normalizeWorkerRuntime(input: WorkerRuntimeInput | undefined) {
+  const manifest = getWorkerBootstrapManifest();
+  return {
+    workerVersion: normalizeProgressText(input?.workerVersion, 80),
+    workerScriptHash: normalizeProgressText(input?.workerScriptHash, 128),
+    workerExpectedVersion: manifest.workerVersion,
+    workerExpectedScriptHash: getWorkerScriptHash(manifest),
+    launcherVersion: normalizeProgressText(input?.launcherVersion, 80),
+    workerUpdatedAt: normalizeOptionalIsoTime(input?.workerUpdatedAt),
+  };
+}
+
+function updateWorkerRuntime(
+  workerId: string,
+  runtime: ReturnType<typeof normalizeWorkerRuntime>,
+  checkedAt: string,
+) {
+  getDatabase()
+    .prepare(
+      `UPDATE workers
+       SET worker_version = CASE WHEN ? != '' THEN ? ELSE worker_version END,
+           worker_script_hash = CASE WHEN ? != '' THEN ? ELSE worker_script_hash END,
+           worker_expected_version = ?,
+           worker_expected_script_hash = ?,
+           launcher_version = CASE WHEN ? != '' THEN ? ELSE launcher_version END,
+           worker_updated_at = CASE WHEN ? IS NOT NULL THEN ? ELSE worker_updated_at END,
+           worker_version_checked_at = ?,
+           updated_at = ?
+       WHERE worker_id = ?`,
+    )
+    .run(
+      runtime.workerVersion,
+      runtime.workerVersion,
+      runtime.workerScriptHash,
+      runtime.workerScriptHash,
+      runtime.workerExpectedVersion,
+      runtime.workerExpectedScriptHash,
+      runtime.launcherVersion,
+      runtime.launcherVersion,
+      runtime.workerUpdatedAt,
+      runtime.workerUpdatedAt,
+      checkedAt,
+      checkedAt,
+      workerId,
+    );
+}
+
+function assertWorkerRuntimeCurrent(worker: WorkerRegistration) {
+  if (worker.workerVersionStatus !== "mismatch") {
+    return;
+  }
+
+  throw new Error(
+    [
+      "本機背景 Worker 版本不同步，請重新下載並重啟 Worker。",
+      worker.workerVersion
+        ? `目前 worker 版本 ${worker.workerVersion}，App 期望 ${worker.workerExpectedVersion}。`
+        : "目前 worker 沒有回報版本資訊。",
+    ].join(" "),
+  );
 }
 
 function normalizeCodexStatus(

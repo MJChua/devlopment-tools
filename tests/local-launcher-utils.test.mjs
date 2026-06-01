@@ -11,9 +11,12 @@ const {
   clearLauncherProfilePat,
   deleteLauncherProfile,
   getLauncherPaths,
+  isWorkerManifestCurrent,
   listLauncherProfiles,
   loadLauncherProfile,
   mergeLauncherProfileForConnect,
+  applyWorkerManifestToProfile,
+  normalizeWorkerBootstrapManifest,
   normalizeConnectPayload,
   redactProfile,
   saveLauncherProfile,
@@ -92,11 +95,49 @@ test("launcher worker environment preserves runtime inputs without logging secre
     CONTROL_PLANE_URL: "https://control-plane.example.com",
     WORKER_ID: "worker",
     WORKER_TOKEN: "cw_token",
-    REPO_PATH: "C:\\repo",
     CODEX_SANDBOX_MODE: "workspace-write",
+    CONTROL_PLANE_LAUNCHER_VERSION: "0.2.0",
+    REPO_PATH: "C:\\repo",
     AZURE_DEVOPS_PAT: "secret-pat",
     CONTROL_PLANE_AUTO_COMMIT_PR: "1",
   });
+});
+
+test("launcher worker manifest metadata is validated and attached to worker env", () => {
+  const manifest = normalizeWorkerBootstrapManifest({
+    workerVersion: "2026.05.29.1",
+    files: [
+      {
+        name: "local-worker.mjs",
+        sha256: "a".repeat(64),
+        bytes: 100,
+      },
+      {
+        name: "local-worker-utils.mjs",
+        sha256: "b".repeat(64),
+        bytes: 50,
+      },
+    ],
+  });
+  const profile = applyWorkerManifestToProfile(
+    {
+      controlPlaneUrl: "https://control-plane.example.com",
+      workerId: "worker",
+      token: "cw_token",
+      sandboxMode: "workspace-write",
+    },
+    manifest,
+  );
+  const env = buildWorkerEnvironment(profile);
+
+  assert.equal(isWorkerManifestCurrent(profile, manifest), true);
+  assert.equal(env.CONTROL_PLANE_WORKER_VERSION, "2026.05.29.1");
+  assert.equal(env.CONTROL_PLANE_WORKER_SCRIPT_HASH, "a".repeat(64));
+  assert.match(env.CONTROL_PLANE_WORKER_UPDATED_AT, /^\d{4}-\d{2}-\d{2}T/);
+  assert.throws(
+    () => normalizeWorkerBootstrapManifest({ workerVersion: "", files: [] }),
+    /manifest is invalid/,
+  );
 });
 
 test("launcher reconnect preserves a saved PAT when no replacement PAT is submitted", () => {
@@ -238,8 +279,9 @@ test("launcher profile PAT clear preserves non-secret worker settings", async ()
     CONTROL_PLANE_URL: "http://localhost:3000",
     WORKER_ID: "worker-clear-pat",
     WORKER_TOKEN: "token",
-    REPO_PATH: "C:\\repo",
     CODEX_SANDBOX_MODE: "danger-full-access",
+    CONTROL_PLANE_LAUNCHER_VERSION: "0.2.0",
+    REPO_PATH: "C:\\repo",
     CONTROL_PLANE_AUTO_COMMIT_PR: "1",
   });
 

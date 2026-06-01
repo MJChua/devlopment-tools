@@ -146,6 +146,9 @@ type LocalLauncherState = {
   hasProfile: boolean;
   hasAzurePat: boolean;
   running: boolean;
+  workerVersion: string;
+  workerScriptHash: string;
+  workerUpdatedAt: string;
   error: string;
 };
 
@@ -162,6 +165,9 @@ type LocalLauncherWorkerStatus = {
   hasAzurePat: boolean;
   running: boolean;
   pid: number | null;
+  workerVersion?: string;
+  workerScriptHash?: string;
+  workerUpdatedAt?: string;
 };
 
 type RuntimeConfigState = RuntimeConfig;
@@ -285,6 +291,9 @@ const DEFAULT_LOCAL_LAUNCHER_STATE: LocalLauncherState = {
   hasProfile: false,
   hasAzurePat: false,
   running: false,
+  workerVersion: "",
+  workerScriptHash: "",
+  workerUpdatedAt: "",
   error: "",
 };
 
@@ -329,6 +338,8 @@ export function WorkflowControlPlane() {
     DEFAULT_LOCAL_LAUNCHER_STATE,
   );
   const [launcherActionState, setLauncherActionState] =
+    useState<LoadState>("idle");
+  const [workerRefreshState, setWorkerRefreshState] =
     useState<LoadState>("idle");
   const [copyState, setCopyState] = useState<
     "idle" | "copied" | "selected" | "error"
@@ -486,7 +497,7 @@ export function WorkflowControlPlane() {
     [selectedRequest, selectedRequestNeedsAttention, visibleRequests],
   );
   const hasLauncherSecondaryControls = Boolean(
-    lastRegisteredWorker || workerHasActiveRequest,
+    lastRegisteredWorker || workerHasActiveRequest || currentWorker,
   );
   const selectedWorker = useMemo(
     () =>
@@ -877,6 +888,9 @@ export function WorkflowControlPlane() {
         hasProfile: Boolean(workerStatus?.hasProfile),
         hasAzurePat: Boolean(workerStatus?.hasAzurePat),
         running: Boolean(workerStatus?.running),
+        workerVersion: workerStatus?.workerVersion || "",
+        workerScriptHash: workerStatus?.workerScriptHash || "",
+        workerUpdatedAt: workerStatus?.workerUpdatedAt || "",
         error: "",
       });
       if (!options.silent) {
@@ -2067,6 +2081,48 @@ export function WorkflowControlPlane() {
     await refreshLocalLauncher({ silent: true });
   }
 
+  async function refreshLocalWorkerCache(
+    options: { retrySameAgent?: boolean } = {},
+  ) {
+    if (!currentWorker) {
+      return;
+    }
+
+    setWorkerRefreshState("loading");
+    setState("loading");
+    setMessage("正在重新下載並重啟本機 Worker...");
+
+    try {
+      await fetchLauncherJson("/refresh-worker", {
+        method: "POST",
+        body: JSON.stringify({ workerId: currentWorker.workerId }),
+      });
+      await Promise.all([
+        refreshAll({ silent: true }),
+        refreshLocalLauncher({ silent: true }),
+        selectedRequestId
+          ? refreshSelectedRequest(selectedRequestId, { silent: true })
+          : Promise.resolve(),
+      ]);
+      setWorkerRefreshState("success");
+      if (options.retrySameAgent && selectedRequest && stageGate?.blockedRunId) {
+        await recoverAgent("retry_same_agent");
+        return;
+      }
+      setState("success");
+      setMessage("本機 Worker 已重新下載並重啟。可重跑同一個 Agent。");
+    } catch (error) {
+      setWorkerRefreshState("error");
+      setState("error");
+      const errorMessage = formatError(error);
+      setMessage(
+        errorMessage.includes("Not found")
+          ? "本機 Launcher 版本太舊，請先按「安裝」更新 Launcher，再重新下載 Worker。"
+          : errorMessage,
+      );
+    }
+  }
+
   async function requestCodexSetup() {
     if (!currentWorker) {
       return;
@@ -2296,6 +2352,21 @@ export function WorkflowControlPlane() {
                             : copyState === "selected"
                               ? "已選取"
                               : "複製指令"}
+                        </button>
+                      ) : null}
+                      {currentWorker && launcherState.available ? (
+                        <button
+                          className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+                          disabled={workerRefreshState === "loading"}
+                          onClick={() => refreshLocalWorkerCache()}
+                          type="button"
+                        >
+                          {workerRefreshState === "loading" ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <RefreshCw className="h-4 w-4" />
+                          )}
+                          重新下載並重啟 Worker
                         </button>
                       ) : null}
                     </div>
@@ -2675,6 +2746,9 @@ export function WorkflowControlPlane() {
                     onClarifyAndRetry={() => recoverAgent("clarify_and_retry")}
                     onOpenQuickClarification={openQuickClarificationDialog}
                     onPasteAttachment={handleRecoveryNotePaste}
+                    onRefreshWorker={() =>
+                      refreshLocalWorkerCache({ retrySameAgent: true })
+                    }
                     onRemoveAttachment={removeRecoveryAttachment}
                     onSelectAttachmentFiles={handleRecoveryAttachmentFileChange}
                     onManualRetry={() => recoverAgent("retry_same_agent")}
@@ -2684,6 +2758,7 @@ export function WorkflowControlPlane() {
                       void refreshSelectedRequest(selectedRequestId)
                     }
                     onSyncOutput={syncAgentOutput}
+                    workerRefreshing={workerRefreshState === "loading"}
                   />
                 ) : null}
                 {selectedRequest.deliveryMode === "draft_pr" &&
@@ -3542,12 +3617,14 @@ function BlockerRecoveryPanel({
   onClarifyAndRetry,
   onOpenQuickClarification,
   onPasteAttachment,
+  onRefreshWorker,
   onRemoveAttachment,
   onSelectAttachmentFiles,
   onManualRetry,
   onStartNewRequest,
   onSync,
   onSyncOutput,
+  workerRefreshing,
 }: {
   latestRun: WorkerRunView | null;
   loading: boolean;
@@ -3561,12 +3638,14 @@ function BlockerRecoveryPanel({
   onClarifyAndRetry: () => void;
   onOpenQuickClarification: () => void;
   onPasteAttachment: (event: ClipboardEvent<HTMLTextAreaElement>) => void;
+  onRefreshWorker: () => void;
   onRemoveAttachment: (attachmentId: string) => void;
   onSelectAttachmentFiles: (event: ChangeEvent<HTMLInputElement>) => void;
   onManualRetry: () => void;
   onStartNewRequest: () => void;
   onSync: () => void;
   onSyncOutput: () => void;
+  workerRefreshing: boolean;
 }) {
   if (!shouldShowBlockerRecoveryPanel(stageGate)) {
     return null;
@@ -3592,6 +3671,7 @@ function BlockerRecoveryPanel({
   const workerStale = Boolean(
     worker?.lastSeenAt && isStaleTimestamp(worker.lastSeenAt),
   );
+  const workerRuntimeError = stageGate.recoveryKind === "worker_runtime_error";
   const blockedAgent = stageGate.blockedAgentRole
     ? formatUiAgentRole(stageGate.blockedAgentRole)
     : blockedRun
@@ -3642,6 +3722,30 @@ function BlockerRecoveryPanel({
       </div>
 
       <BlockerSummaryList items={stageGate.blockers} />
+
+      {workerRuntimeError ? (
+        <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-900">
+          <div className="font-semibold">本機 Worker 版本不同步</div>
+          <p className="mt-1">
+            App 會重新下載 worker 腳本、重啟背景 worker，並重跑同一個
+            Agent，不需要重新輸入需求。
+          </p>
+          <Button
+            className="mt-3 gap-2"
+            disabled={loading || workerRefreshing}
+            onClick={onRefreshWorker}
+            type="button"
+            variant="outline"
+          >
+            {workerRefreshing ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4" />
+            )}
+            重新下載並重啟 Worker
+          </Button>
+        </div>
+      ) : null}
 
       {stageGate.clarificationPrompt ? (
         <div className="mt-3 flex flex-col gap-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm leading-6 text-blue-900 sm:flex-row sm:items-center sm:justify-between">
@@ -5479,6 +5583,28 @@ function getWorkerConnectionInfo(
     };
   }
 
+  if (worker.workerVersionStatus === "mismatch") {
+    return {
+      ready: true,
+      label: "Worker 版本不同步",
+      detail: worker.workerVersion
+        ? `目前 worker 版本 ${worker.workerVersion}，App 期望 ${worker.workerExpectedVersion}。請重新下載並重啟 Worker。`
+        : "目前 worker 沒有回報版本資訊，請重新下載並重啟 Worker。",
+      diagnosticCode: worker.codexDiagnosticCode,
+      executablePath: worker.codexExecutablePath,
+    };
+  }
+
+  if (worker.workerVersionStatus === "unknown") {
+    return {
+      ready: true,
+      label: "Worker 版本未確認",
+      detail: "目前 worker 尚未回報版本與腳本 hash；可繼續查看流程，但建議重新下載並重啟 Worker。",
+      diagnosticCode: worker.codexDiagnosticCode,
+      executablePath: worker.codexExecutablePath,
+    };
+  }
+
   return {
     ready: true,
     label: "已連線",
@@ -5812,6 +5938,14 @@ function formatRecoveryPanelSummary(stageGate: StageGateResult) {
     return "Handoff 不完整。";
   }
 
+  if (stageGate.recoveryKind === "worker_runtime_error") {
+    return "本機 Worker 版本不同步，需重新下載並重啟。";
+  }
+
+  if (stageGate.recoveryKind === "repo_dirty_blocked") {
+    return "本機 repo 有未提交異動或分支衝突。";
+  }
+
   if (stageGate.needsClarification) {
     return "補充後重跑同一 Agent。";
   }
@@ -5830,6 +5964,14 @@ function formatRecoveryNextStep(stageGate: StageGateResult) {
 
   if (stageGate.needsClarification) {
     return "補充後重跑";
+  }
+
+  if (stageGate.recoveryKind === "worker_runtime_error") {
+    return "更新 Worker";
+  }
+
+  if (stageGate.recoveryKind === "repo_dirty_blocked") {
+    return "處理 repo 狀態";
   }
 
   if (stageGate.canManualRetry) {
@@ -5883,6 +6025,22 @@ function formatStageGateDisplay(stageGate: StageGateResult) {
   }
 
   if (stageGate.status === "blocked") {
+    if (stageGate.recoveryKind === "worker_runtime_error") {
+      return {
+        status: statusLabels[stageGate.status],
+        label: "本機 Worker 版本不同步",
+        summary: "請重新下載並重啟背景 Worker，再重跑同一個 Agent。",
+      };
+    }
+
+    if (stageGate.recoveryKind === "repo_dirty_blocked") {
+      return {
+        status: statusLabels[stageGate.status],
+        label: "本機 repo 狀態需處理",
+        summary: "正式 PR 流程需要乾淨工作區，請先處理未提交異動或分支衝突。",
+      };
+    }
+
     return {
       status: statusLabels[stageGate.status],
       label: "流程已暫停",
@@ -5903,6 +6061,14 @@ function formatStageGateDisplay(stageGate: StageGateResult) {
 function formatStageGateListItem(item: string) {
   if (item === "No Local Worker is assigned to this request.") {
     return "此需求尚未指派本機 worker。";
+  }
+
+  if (item.includes("本機背景 Worker 版本不同步")) {
+    return "本機背景 Worker 版本不同步，請重新下載並重啟 Worker。";
+  }
+
+  if (item.includes("本機 repo 目前有未提交異動")) {
+    return item;
   }
 
   if (item === "Wait for the assigned Local Worker to return artifacts.") {

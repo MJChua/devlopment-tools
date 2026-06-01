@@ -19,6 +19,15 @@ test("creates stable request ids from kind, local timestamp, and slug", () => {
   );
 });
 
+test("creates hotfix request ids from the explicit request kind", () => {
+  const createdAt = new Date(2026, 4, 25, 14, 31);
+
+  assert.equal(
+    createRequestId("HOTFIX", "Production Login Fix", createdAt),
+    "HOTFIX-202605251431-production-login-fix",
+  );
+});
+
 test("slug fallback keeps request ids valid when title has no ascii token", () => {
   assert.equal(slugifyRequestTitle("會員查詢"), "request");
 });

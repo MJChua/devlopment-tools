@@ -38,6 +38,7 @@ export async function POST(request: Request) {
         codexExecutablePath: body.codexExecutablePath,
         codexCheckedAt: body.codexCheckedAt,
       },
+      runtime: body.runtime,
     });
 
     return NextResponse.json(
