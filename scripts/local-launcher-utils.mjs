@@ -53,13 +53,36 @@ export async function loadLauncherConfig(paths) {
     return {
       allowedOrigins: normalizeAllowedOrigins(parsed.allowedOrigins),
       installedAt: typeof parsed.installedAt === "string" ? parsed.installedAt : "",
+      installMode: normalizeLauncherInstallMode(parsed.installMode),
+      scheduledTaskStatus: normalizeScheduledTaskStatus(parsed.scheduledTaskStatus),
+      requiresAdminInstall: parsed.requiresAdminInstall === true,
+      scheduledTaskError:
+        typeof parsed.scheduledTaskError === "string"
+          ? parsed.scheduledTaskError.trim()
+          : "",
     };
   } catch {
     return {
       allowedOrigins: [...defaultDevOrigins],
       installedAt: "",
+      installMode: "unknown",
+      scheduledTaskStatus: "unknown",
+      requiresAdminInstall: false,
+      scheduledTaskError: "",
     };
   }
+}
+
+export function normalizeLauncherInstallMode(value) {
+  return value === "scheduled-task" || value === "temporary-startup-folder"
+    ? value
+    : "unknown";
+}
+
+export function normalizeScheduledTaskStatus(value) {
+  return value === "installed" || value === "access-denied" || value === "failed"
+    ? value
+    : "unknown";
 }
 
 export function normalizeAllowedOrigins(origins) {

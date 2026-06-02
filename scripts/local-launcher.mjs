@@ -45,7 +45,7 @@ async function main() {
   const server = http.createServer((request, response) => {
     void handleRequest(request, response).catch((error) => {
       void appendLauncherLog(`request failed: ${formatError(error)}`);
-      sendJson(response, 500, { ok: false, error: formatError(error) });
+      sendErrorJson(response, error);
     });
   });
 
@@ -84,6 +84,10 @@ async function handleRequest(request, response) {
           name: "Codex Mission Control Local Launcher",
           version: LOCAL_LAUNCHER_VERSION,
           port: LOCAL_LAUNCHER_PORT,
+          installMode: config.installMode,
+          scheduledTaskStatus: config.scheduledTaskStatus,
+          requiresAdminInstall: config.requiresAdminInstall,
+          scheduledTaskError: config.scheduledTaskError,
         },
         corsHeaders,
       );
@@ -219,7 +223,7 @@ async function handleRequest(request, response) {
     sendJson(response, 404, { ok: false, error: "Not found." }, corsHeaders);
   } catch (error) {
     await appendLauncherLog(`request failed: ${formatError(error)}`);
-    sendJson(response, 500, { ok: false, error: formatError(error) }, corsHeaders);
+    sendErrorJson(response, error, corsHeaders);
   }
 }
 
@@ -246,7 +250,7 @@ async function connectProfile(profile) {
 }
 
 async function callControlPlaneAzureApi(workerId, apiPath, payload) {
-  const profile = await loadLauncherProfile(paths, workerId);
+  const profile = await loadRequiredLauncherProfile(workerId);
   const url = new URL(apiPath, profile.controlPlaneUrl);
   const response = await fetch(url, {
     method: "POST",
@@ -333,7 +337,7 @@ async function startWorkerProcess(profile) {
 }
 
 async function startVisibleCodexSetup(workerId) {
-  const profile = await loadLauncherProfile(paths, workerId);
+  const profile = await loadRequiredLauncherProfile(workerId);
   const manifest = await downloadWorkerFiles(profile.controlPlaneUrl);
   const readyProfile = applyWorkerManifestToProfile(profile, manifest);
   await saveLauncherProfile(paths, readyProfile);
@@ -389,7 +393,7 @@ async function stopProfile(workerId) {
 }
 
 async function clearProfilePat(workerId) {
-  const existingProfile = await loadLauncherProfile(paths, workerId);
+  const existingProfile = await loadRequiredLauncherProfile(workerId);
   await stopKnownProcess(workerId, existingProfile.workerPid || 0);
   const profile = await clearLauncherProfilePat(paths, workerId);
   await connectProfile(profile);
@@ -398,7 +402,7 @@ async function clearProfilePat(workerId) {
 }
 
 async function refreshWorkerProfile(workerId) {
-  const profile = await loadLauncherProfile(paths, workerId);
+  const profile = await loadRequiredLauncherProfile(workerId);
   const manifest = await downloadWorkerFiles(profile.controlPlaneUrl);
   await stopKnownProcess(workerId, profile.workerPid || 0);
   const readyProfile = applyWorkerManifestToProfile(profile, manifest);
@@ -411,6 +415,17 @@ async function refreshWorkerProfile(workerId) {
   await saveLauncherProfile(paths, updatedProfile);
   await appendLauncherLog(`refreshed worker ${workerId}`);
   return updatedProfile;
+}
+
+async function loadRequiredLauncherProfile(workerId) {
+  try {
+    return await loadLauncherProfile(paths, workerId);
+  } catch (error) {
+    if (isMissingProfileError(error)) {
+      throw new LauncherProfileMissingError(workerId);
+    }
+    throw error;
+  }
 }
 
 async function stopKnownProcess(workerId, pid) {
@@ -566,6 +581,32 @@ function sendJson(response, status, body, headers = {}) {
   response.end(JSON.stringify(body));
 }
 
+function sendErrorJson(response, error, headers = {}) {
+  const payload = buildLauncherErrorPayload(error);
+  sendJson(response, payload.status, payload.body, headers);
+}
+
+function buildLauncherErrorPayload(error) {
+  if (error instanceof LauncherProfileMissingError) {
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        code: "launcher_profile_missing",
+        error: error.message,
+      },
+    };
+  }
+
+  return {
+    status: 500,
+    body: {
+      ok: false,
+      error: formatError(error),
+    },
+  };
+}
+
 async function appendLauncherLog(message) {
   await ensureLauncherDirectories(paths);
   await writeFile(
@@ -580,6 +621,24 @@ async function appendLauncherLog(message) {
 
 function formatError(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isMissingProfileError(error) {
+  return (
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === "ENOENT"
+  );
+}
+
+class LauncherProfileMissingError extends Error {
+  constructor(workerId) {
+    super(
+      `本機 Launcher 沒有保存 worker ${workerId} 的連線資料。請重新啟動本機 worker 連線；如果需要 draft PR，請重新輸入 Azure PAT。`,
+    );
+    this.name = "LauncherProfileMissingError";
+  }
 }
 
 main().catch((error) => {

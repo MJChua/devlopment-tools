@@ -86,6 +86,8 @@ export type StageGateRecoveryKind =
   | "agent_failed"
   | "agent_blocked"
   | "worker_runtime_error"
+  | "worker_internal_error"
+  | "worker_version_mismatch"
   | "repo_dirty_blocked"
   | "stale_run"
   | "human_decision";
@@ -1917,13 +1919,28 @@ export function isHandoffSchemaRun(run: Pick<WorkerRun, "error">) {
 }
 
 export function isWorkerRuntimeErrorRun(run: Pick<WorkerRun, "error" | "artifact">) {
+  return isWorkerInternalErrorRun(run) || isWorkerVersionMismatchRun(run);
+}
+
+export function isWorkerInternalErrorRun(run: Pick<WorkerRun, "error" | "artifact">) {
   const text = `${run.error}\n${run.artifact}`.toLowerCase();
   return (
-    text.includes("worker_runtime_error") ||
+    text.includes("worker_internal_error") ||
     text.includes("referenceerror") ||
-    text.includes("is not defined") ||
-    text.includes("本機背景 worker 版本不同步") ||
-    text.includes("worker version")
+    text.includes("is not defined")
+  );
+}
+
+export function isWorkerVersionMismatchRun(run: Pick<WorkerRun, "error" | "artifact">) {
+  const text = `${run.error}\n${run.artifact}`.toLowerCase();
+  return (
+    text.includes("worker_version_mismatch") ||
+    text.includes("worker script integrity mismatch") ||
+    text.includes("worker version") ||
+    (text.includes("worker_runtime_error") &&
+      (text.includes("版本不同步") ||
+        text.includes("worker hash") ||
+        text.includes("script hash")))
   );
 }
 
@@ -1980,9 +1997,13 @@ export function evaluateWorkflowStageGate(
   }
 
   if (failedRun) {
-    if (isWorkerRuntimeErrorRun(failedRun)) {
+    if (isWorkerInternalErrorRun(failedRun)) {
       blockers.push(
-        "本機背景 Worker 版本不同步或執行環境異常，請重新下載並重啟 Worker。",
+        "worker_internal_error: Worker 內部錯誤，請更新/重啟 Worker；若仍同錯，表示 App 提供的 worker bundle 需要修復。",
+      );
+    } else if (isWorkerVersionMismatchRun(failedRun)) {
+      blockers.push(
+        "worker_version_mismatch: 本機 Worker 版本不同步，請重新下載並重啟 Worker。",
       );
     } else if (isRepoDirtyBlockedRun(failedRun)) {
       blockers.push(
@@ -2104,6 +2125,12 @@ export function evaluateWorkflowStageGate(
     const workerRuntimeError = failedRun
       ? isWorkerRuntimeErrorRun(failedRun)
       : false;
+    const workerInternalError = failedRun
+      ? isWorkerInternalErrorRun(failedRun)
+      : false;
+    const workerVersionMismatch = failedRun
+      ? isWorkerVersionMismatchRun(failedRun)
+      : false;
     const repoDirtyBlocked = failedRun ? isRepoDirtyBlockedRun(failedRun) : false;
     const clarificationPrompt = failedRun
       ? extractClarificationPromptFromArtifact(failedRun.artifact)
@@ -2120,13 +2147,15 @@ export function evaluateWorkflowStageGate(
       recoveryKind: failedRun
         ? isHandoffSchemaRun(failedRun)
           ? "handoff_schema"
-          : workerRuntimeError
-            ? "worker_runtime_error"
-            : repoDirtyBlocked
-              ? "repo_dirty_blocked"
-              : failedRun.status === "failed"
-                ? "agent_failed"
-                : "agent_blocked"
+          : workerInternalError
+            ? "worker_internal_error"
+            : workerVersionMismatch
+              ? "worker_version_mismatch"
+              : repoDirtyBlocked
+                ? "repo_dirty_blocked"
+                : failedRun.status === "failed"
+                  ? "agent_failed"
+                  : "agent_blocked"
         : "none",
       canAutoRepair,
       canManualRetry: Boolean(failedRun),

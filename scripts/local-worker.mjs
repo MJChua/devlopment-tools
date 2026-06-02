@@ -988,8 +988,12 @@ async function computeCurrentWorkerScriptHash() {
 
 function formatBlockedWorkerError(error) {
   const message = formatError(error);
-  if (isWorkerRuntimeError(error, message)) {
-    return `worker_runtime_error: 本機背景 Worker 版本不同步或執行環境異常，請重新下載並重啟 Worker。原始錯誤：${message}`;
+  if (isWorkerVersionMismatchError(message)) {
+    return `worker_version_mismatch: 本機背景 Worker 版本不同步，請重新下載並重啟 Worker。原始錯誤：${message}`;
+  }
+
+  if (isWorkerInternalError(error, message)) {
+    return `worker_internal_error: 本機背景 Worker 內部錯誤，請更新/重啟 Worker；若仍同錯，表示 App 提供的 worker bundle 需要修復。原始錯誤：${message}`;
   }
 
   if (isRepoDirtyError(message)) {
@@ -999,11 +1003,12 @@ function formatBlockedWorkerError(error) {
   return message;
 }
 
-function isWorkerRuntimeError(error, message) {
-  return (
-    error instanceof ReferenceError ||
-    /is not defined|worker script integrity mismatch|worker version/i.test(message)
-  );
+function isWorkerVersionMismatchError(message) {
+  return /worker script integrity mismatch|worker version/i.test(message);
+}
+
+function isWorkerInternalError(error, message) {
+  return error instanceof ReferenceError || /is not defined/i.test(message);
 }
 
 function isRepoDirtyError(message) {

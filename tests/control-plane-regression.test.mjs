@@ -45,6 +45,20 @@ test("workflow UI does not render the removed workspace diagnostics card", () =>
   assert.doesNotMatch(source, /getControlPlaneMode/);
 });
 
+test("workflow UI routes missing launcher profiles to toast-only guidance", () => {
+  const source = readFileSync(
+    new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /launcher_profile_missing/);
+  assert.match(source, /本機連線資料不存在，請按/);
+  assert.match(source, /launcherState\.available && launcherState\.hasProfile/);
+  assert.match(source, /workerVersionMismatch && launcherHasProfile/);
+  assert.doesNotMatch(source, /本機連線資料已不存在/);
+  assert.doesNotMatch(source, /重新連線本機 Worker/);
+});
+
 test("testing-stage write policy allows only AITraining source branches", () => {
   assert.equal(
     normalizeBranchName("refs/heads/AITraining/test_p"),

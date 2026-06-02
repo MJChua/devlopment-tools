@@ -18,6 +18,10 @@ test("worker bootstrap serves launcher installer with no-store headers", async (
   assert.match(body, /-RunLevel Limited/);
   assert.doesNotMatch(body, /LeastPrivilege/);
   assert.match(body, /Startup folder/);
+  assert.match(body, /temporary-startup-folder/);
+  assert.match(body, /requiresAdminInstall/);
+  assert.match(body, /scheduledTaskStatus/);
+  assert.match(body, /Open PowerShell as Administrator/);
   assert.match(body, /Install-StartupShortcut/);
   assert.match(body, /Stop-ExistingLauncher/);
   assert.match(body, /Start-Process/);
@@ -34,7 +38,8 @@ test("worker bootstrap serves local launcher scripts", async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") || "", /text\/javascript/);
   assert.match(body, /LOCAL_LAUNCHER_HOST/);
-  assert.match(body, /sendJson\(response, 500, \{ ok: false, error: formatError\(error\) \}, corsHeaders\)/);
+  assert.match(body, /sendErrorJson\(response, error/);
+  assert.match(body, /launcher_profile_missing/);
 });
 
 test("worker bootstrap serves a hash manifest for worker scripts", async () => {

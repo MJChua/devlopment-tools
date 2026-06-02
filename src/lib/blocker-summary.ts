@@ -87,15 +87,34 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
   }
 
   if (
-    normalized.includes("worker_runtime_error") ||
+    normalized.includes("worker_internal_error") ||
+    normalized.includes("referenceerror") ||
+    normalized.includes("is not defined")
+  ) {
+    return {
+      title: "Worker 內部錯誤",
+      reason:
+        "流程是在本機 Worker 自己的執行或收尾邏輯中斷，尚未變成真正的 Agent 判斷結果。",
+      nextAction:
+        "先更新/重啟 Worker，然後重跑同一個 Agent；如果仍出現同一個內部錯誤，表示 App 提供的 worker bundle 需要修復。",
+      original,
+    };
+  }
+
+  if (
+    normalized.includes("worker_version_mismatch") ||
     normalized.includes("worker 版本不同步") ||
     normalized.includes("worker version") ||
-    normalized.includes("is not defined")
+    normalized.includes("worker script integrity mismatch") ||
+    (normalized.includes("worker_runtime_error") &&
+      (normalized.includes("版本不同步") ||
+        normalized.includes("script hash") ||
+        normalized.includes("worker hash")))
   ) {
     return {
       title: "本機 Worker 版本不同步",
       reason:
-        "App 已更新，但背景 worker 快取的腳本不是同一版，流程還沒進入真正的 Agent 判斷就先在 worker 內部錯誤中斷。",
+        "App 期望的 Worker 版本或腳本 hash 與本機正在執行的 Worker 不一致，流程需要先同步本機 Worker。",
       nextAction:
         "按「重新下載並重啟 Worker」，完成後重跑同一個 Agent，不需要重新輸入需求。",
       original,

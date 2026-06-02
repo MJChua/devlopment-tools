@@ -143,6 +143,10 @@ type LocalLauncherState = {
   checked: boolean;
   available: boolean;
   version: string;
+  installMode: "scheduled-task" | "temporary-startup-folder" | "unknown";
+  scheduledTaskStatus: "installed" | "access-denied" | "failed" | "unknown";
+  requiresAdminInstall: boolean;
+  scheduledTaskError: string;
   hasProfile: boolean;
   hasAzurePat: boolean;
   running: boolean;
@@ -156,6 +160,10 @@ type LocalLauncherHealth = {
   ok: boolean;
   version: string;
   port: number;
+  installMode?: "scheduled-task" | "temporary-startup-folder" | "unknown";
+  scheduledTaskStatus?: "installed" | "access-denied" | "failed" | "unknown";
+  requiresAdminInstall?: boolean;
+  scheduledTaskError?: string;
 };
 
 type LocalLauncherWorkerStatus = {
@@ -169,6 +177,8 @@ type LocalLauncherWorkerStatus = {
   workerScriptHash?: string;
   workerUpdatedAt?: string;
 };
+
+type LauncherError = Error & { code?: string };
 
 type RuntimeConfigState = RuntimeConfig;
 
@@ -288,6 +298,10 @@ const DEFAULT_LOCAL_LAUNCHER_STATE: LocalLauncherState = {
   checked: false,
   available: false,
   version: "",
+  installMode: "unknown",
+  scheduledTaskStatus: "unknown",
+  requiresAdminInstall: false,
+  scheduledTaskError: "",
   hasProfile: false,
   hasAzurePat: false,
   running: false,
@@ -439,7 +453,9 @@ export function WorkflowControlPlane() {
   const localWorkerConnected = Boolean(
     currentWorker &&
       currentWorker.status !== "disabled" &&
-      (launcherState.running || launcherState.hasProfile || workerHasRecentHeartbeat),
+      (launcherState.available
+        ? launcherState.running || launcherState.hasProfile
+        : workerHasRecentHeartbeat),
   );
   const hasAzureWorkItemAccess =
     Boolean(workerForm.azurePat.trim()) ||
@@ -885,6 +901,10 @@ export function WorkflowControlPlane() {
         checked: true,
         available: true,
         version: health.version || "",
+        installMode: health.installMode || "unknown",
+        scheduledTaskStatus: health.scheduledTaskStatus || "unknown",
+        requiresAdminInstall: health.requiresAdminInstall === true,
+        scheduledTaskError: health.scheduledTaskError || "",
         hasProfile: Boolean(workerStatus?.hasProfile),
         hasAzurePat: Boolean(workerStatus?.hasAzurePat),
         running: Boolean(workerStatus?.running),
@@ -2114,7 +2134,14 @@ export function WorkflowControlPlane() {
     } catch (error) {
       setWorkerRefreshState("error");
       setState("error");
+      await refreshLocalLauncher({ silent: true });
       const errorMessage = formatError(error);
+      if (getLauncherErrorCode(error) === "launcher_profile_missing") {
+        setMessage(
+          "本機連線資料不存在，請按「啟動連線」重新連線；需要 PR 時請重新輸入 PAT。",
+        );
+        return;
+      }
       setMessage(
         errorMessage.includes("Not found")
           ? "本機 Launcher 版本太舊，請先按「安裝」更新 Launcher，再重新下載 Worker。"
@@ -2337,6 +2364,20 @@ export function WorkflowControlPlane() {
                 step="3"
                 title="產生並啟動 worker"
               >
+                {launcherState.available && launcherState.requiresAdminInstall ? (
+                  <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-900">
+                    <div className="font-semibold">Launcher 目前是暫時啟動模式</div>
+                    <p className="mt-1">
+                      目前 worker 可以使用，但 Scheduled Task 尚未正式安裝；重開機或重新登入後穩定性取決於 Startup
+                      folder。請用管理員 PowerShell 重新執行安裝指令，完成正式 Scheduled Task 安裝。
+                    </p>
+                    {launcherState.scheduledTaskError ? (
+                      <p className="mt-1 break-all text-xs text-amber-800">
+                        Scheduled Task 錯誤：{launcherState.scheduledTaskError}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
                 {hasLauncherSecondaryControls ? (
                   <div className="flex flex-col gap-2">
                     <div className="flex flex-wrap gap-2">
@@ -2354,7 +2395,7 @@ export function WorkflowControlPlane() {
                               : "複製指令"}
                         </button>
                       ) : null}
-                      {currentWorker && launcherState.available ? (
+                      {currentWorker && launcherState.available && launcherState.hasProfile ? (
                         <button
                           className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
                           disabled={workerRefreshState === "loading"}
@@ -2758,6 +2799,7 @@ export function WorkflowControlPlane() {
                       void refreshSelectedRequest(selectedRequestId)
                     }
                     onSyncOutput={syncAgentOutput}
+                    launcherHasProfile={launcherState.hasProfile}
                     workerRefreshing={workerRefreshState === "loading"}
                   />
                 ) : null}
@@ -3613,6 +3655,7 @@ function BlockerRecoveryPanel({
   runs,
   stageGate,
   worker,
+  launcherHasProfile,
   onChangeNote,
   onClarifyAndRetry,
   onOpenQuickClarification,
@@ -3645,6 +3688,7 @@ function BlockerRecoveryPanel({
   onStartNewRequest: () => void;
   onSync: () => void;
   onSyncOutput: () => void;
+  launcherHasProfile: boolean;
   workerRefreshing: boolean;
 }) {
   if (!shouldShowBlockerRecoveryPanel(stageGate)) {
@@ -3671,7 +3715,10 @@ function BlockerRecoveryPanel({
   const workerStale = Boolean(
     worker?.lastSeenAt && isStaleTimestamp(worker.lastSeenAt),
   );
-  const workerRuntimeError = stageGate.recoveryKind === "worker_runtime_error";
+  const workerInternalError = stageGate.recoveryKind === "worker_internal_error";
+  const workerVersionMismatch =
+    stageGate.recoveryKind === "worker_version_mismatch" ||
+    stageGate.recoveryKind === "worker_runtime_error";
   const blockedAgent = stageGate.blockedAgentRole
     ? formatUiAgentRole(stageGate.blockedAgentRole)
     : blockedRun
@@ -3723,7 +3770,7 @@ function BlockerRecoveryPanel({
 
       <BlockerSummaryList items={stageGate.blockers} />
 
-      {workerRuntimeError ? (
+      {workerVersionMismatch && launcherHasProfile ? (
         <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-900">
           <div className="font-semibold">本機 Worker 版本不同步</div>
           <p className="mt-1">
@@ -3743,6 +3790,31 @@ function BlockerRecoveryPanel({
               <RefreshCw className="h-4 w-4" />
             )}
             重新下載並重啟 Worker
+          </Button>
+        </div>
+      ) : null}
+
+      {workerInternalError && launcherHasProfile ? (
+        <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-900">
+          <div className="font-semibold">Worker 內部錯誤</div>
+          <p className="mt-1">
+            錯誤發生在本機 Worker 自己的執行或收尾邏輯。先更新/重啟
+            Worker，之後重跑同一個 Agent；如果仍出現同一錯誤，表示 App
+            提供的 worker bundle 需要修復。
+          </p>
+          <Button
+            className="mt-3 gap-2"
+            disabled={loading || workerRefreshing}
+            onClick={onRefreshWorker}
+            type="button"
+            variant="outline"
+          >
+            {workerRefreshing ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4" />
+            )}
+            更新並重啟 Worker
           </Button>
         </div>
       ) : null}
@@ -5427,10 +5499,14 @@ async function fetchLauncherJson<T>(
     const response = await fetchLauncherResponse(path, init, controller.signal);
     const data = (await response
       .json()
-      .catch(() => ({}))) as { error?: string } & T;
+      .catch(() => ({}))) as { error?: string; code?: string } & T;
 
     if (!response.ok) {
-      throw new Error(data.error ?? `Launcher request failed with ${response.status}.`);
+      const error = new Error(
+        data.error ?? `Launcher request failed with ${response.status}.`,
+      ) as LauncherError;
+      error.code = data.code;
+      throw error;
     }
 
     return data as T;
@@ -5908,15 +5984,21 @@ function formatLauncherStatus(launcherState: LocalLauncherState) {
     return "尚未偵測到本機 Launcher。";
   }
 
+  const installSuffix = launcherState.requiresAdminInstall
+    ? "（暫時 Startup folder 啟動，需管理員 PowerShell 完成 Scheduled Task 安裝）"
+    : launcherState.installMode === "scheduled-task"
+      ? "（Scheduled Task 已安裝）"
+      : "";
+
   if (launcherState.running) {
-    return "本機 Launcher 已安裝，背景 worker 執行中。";
+    return `本機 Launcher 已啟動，背景 worker 執行中。${installSuffix}`;
   }
 
   if (launcherState.hasProfile) {
-    return "本機 Launcher 已安裝，正在等待背景 worker 回報。";
+    return `本機 Launcher 已啟動，正在等待背景 worker 回報。${installSuffix}`;
   }
 
-  return "本機 Launcher 已安裝，尚未連線 worker。";
+  return `本機 Launcher 已啟動，尚未連線 worker。${installSuffix}`;
 }
 
 function shouldShowBlockerRecoveryPanel(stageGate: StageGateResult) {
@@ -5938,8 +6020,15 @@ function formatRecoveryPanelSummary(stageGate: StageGateResult) {
     return "Handoff 不完整。";
   }
 
-  if (stageGate.recoveryKind === "worker_runtime_error") {
+  if (
+    stageGate.recoveryKind === "worker_version_mismatch" ||
+    stageGate.recoveryKind === "worker_runtime_error"
+  ) {
     return "本機 Worker 版本不同步，需重新下載並重啟。";
+  }
+
+  if (stageGate.recoveryKind === "worker_internal_error") {
+    return "Worker 內部錯誤，需更新/重啟後重跑同一 Agent。";
   }
 
   if (stageGate.recoveryKind === "repo_dirty_blocked") {
@@ -5966,8 +6055,15 @@ function formatRecoveryNextStep(stageGate: StageGateResult) {
     return "補充後重跑";
   }
 
-  if (stageGate.recoveryKind === "worker_runtime_error") {
+  if (
+    stageGate.recoveryKind === "worker_version_mismatch" ||
+    stageGate.recoveryKind === "worker_runtime_error"
+  ) {
     return "更新 Worker";
+  }
+
+  if (stageGate.recoveryKind === "worker_internal_error") {
+    return "修復 Worker";
   }
 
   if (stageGate.recoveryKind === "repo_dirty_blocked") {
@@ -6025,11 +6121,23 @@ function formatStageGateDisplay(stageGate: StageGateResult) {
   }
 
   if (stageGate.status === "blocked") {
-    if (stageGate.recoveryKind === "worker_runtime_error") {
+    if (
+      stageGate.recoveryKind === "worker_version_mismatch" ||
+      stageGate.recoveryKind === "worker_runtime_error"
+    ) {
       return {
         status: statusLabels[stageGate.status],
         label: "本機 Worker 版本不同步",
         summary: "請重新下載並重啟背景 Worker，再重跑同一個 Agent。",
+      };
+    }
+
+    if (stageGate.recoveryKind === "worker_internal_error") {
+      return {
+        status: statusLabels[stageGate.status],
+        label: "Worker 內部錯誤",
+        summary:
+          "請更新/重啟 Worker 後重跑同一個 Agent；若仍同錯，需修復 App 提供的 worker bundle。",
       };
     }
 
@@ -6063,7 +6171,15 @@ function formatStageGateListItem(item: string) {
     return "此需求尚未指派本機 worker。";
   }
 
-  if (item.includes("本機背景 Worker 版本不同步")) {
+  if (item.includes("worker_internal_error") || item.includes("Worker 內部錯誤")) {
+    return "Worker 內部錯誤，請更新/重啟 Worker；若仍同錯，表示 App 提供的 worker bundle 需要修復。";
+  }
+
+  if (
+    item.includes("worker_version_mismatch") ||
+    item.includes("本機背景 Worker 版本不同步") ||
+    item.includes("本機 Worker 版本不同步")
+  ) {
     return "本機背景 Worker 版本不同步，請重新下載並重啟 Worker。";
   }
 
@@ -6345,4 +6461,13 @@ function extractAzureReferenceFromDetail(detail: string): {
 
 function formatError(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error.";
+}
+
+function getLauncherErrorCode(error: unknown) {
+  if (!error || typeof error !== "object" || !("code" in error)) {
+    return "";
+  }
+
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : "";
 }

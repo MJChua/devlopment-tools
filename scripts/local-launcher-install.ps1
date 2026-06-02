@@ -70,6 +70,44 @@ function Install-StartupShortcut {
   $shortcut.Save()
 }
 
+function Write-LauncherConfig {
+  param(
+    [string]$ConfigPath,
+    [string]$ControlPlaneOrigin,
+    [string]$InstallMode,
+    [string]$ScheduledTaskStatus,
+    [bool]$RequiresAdminInstall,
+    [string]$ScheduledTaskError
+  )
+
+  $config = @{
+    allowedOrigins = @($ControlPlaneOrigin)
+    installedAt = (Get-Date).ToUniversalTime().ToString("o")
+    installMode = $InstallMode
+    scheduledTaskStatus = $ScheduledTaskStatus
+    requiresAdminInstall = $RequiresAdminInstall
+    scheduledTaskError = $ScheduledTaskError
+  } | ConvertTo-Json -Depth 4
+  $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+  [System.IO.File]::WriteAllText($ConfigPath, $config, $utf8NoBom)
+}
+
+function Get-ScheduledTaskStatusFromError {
+  param([string]$Message)
+
+  $lowerMessage = $Message.ToLowerInvariant()
+  if (
+    $lowerMessage.Contains("access is denied") -or
+    $lowerMessage.Contains("access denied") -or
+    $Message.Contains("拒絕存取") -or
+    $Message.Contains("存取被拒")
+  ) {
+    return "access-denied"
+  }
+
+  return "failed"
+}
+
 New-Item -ItemType Directory -Force -Path $launcherRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 
@@ -80,16 +118,12 @@ foreach ($file in $files) {
   Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile (Join-Path $launcherRoot $file)
 }
 
-$config = @{
-  allowedOrigins = @($controlPlaneOrigin)
-  installedAt = (Get-Date).ToUniversalTime().ToString("o")
-} | ConvertTo-Json -Depth 4
-$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-[System.IO.File]::WriteAllText($configPath, $config, $utf8NoBom)
-
 Stop-ExistingLauncher -LauncherScript $launcherPath
 
 $installMode = "scheduled-task"
+$scheduledTaskStatus = "installed"
+$requiresAdminInstall = $false
+$scheduledTaskError = ""
 try {
   $action = New-ScheduledTaskAction -Execute $nodeCommand.Source -Argument "`"$launcherPath`""
   $trigger = New-ScheduledTaskTrigger -AtLogOn
@@ -110,15 +144,33 @@ try {
     -Principal $principal `
     -Force | Out-Null
 
+  Write-LauncherConfig `
+    -ConfigPath $configPath `
+    -ControlPlaneOrigin $controlPlaneOrigin `
+    -InstallMode $installMode `
+    -ScheduledTaskStatus $scheduledTaskStatus `
+    -RequiresAdminInstall $requiresAdminInstall `
+    -ScheduledTaskError $scheduledTaskError
+
   Start-ScheduledTask -TaskName $taskName
 } catch {
-  $installMode = "startup-folder"
-  Write-Warning "Scheduled Task install failed. Falling back to the current user's Startup folder. $($_.Exception.Message)"
+  $scheduledTaskError = $_.Exception.Message
+  $installMode = "temporary-startup-folder"
+  $scheduledTaskStatus = Get-ScheduledTaskStatusFromError -Message $scheduledTaskError
+  $requiresAdminInstall = $true
+  Write-Warning "Scheduled Task requires administrator permission. Temporary Startup folder fallback is active. $scheduledTaskError"
   Install-StartupShortcut `
     -NodePath $nodeCommand.Source `
     -LauncherScript $launcherPath `
     -WorkingDirectory $launcherRoot `
     -ShortcutPath $startupLink
+  Write-LauncherConfig `
+    -ConfigPath $configPath `
+    -ControlPlaneOrigin $controlPlaneOrigin `
+    -InstallMode $installMode `
+    -ScheduledTaskStatus $scheduledTaskStatus `
+    -RequiresAdminInstall $requiresAdminInstall `
+    -ScheduledTaskError $scheduledTaskError
   Start-Launcher `
     -NodePath $nodeCommand.Source `
     -LauncherScript $launcherPath `
@@ -127,4 +179,12 @@ try {
 
 Write-Host "Codex Mission Control Local Launcher installed for $controlPlaneOrigin"
 Write-Host "Install mode: $installMode"
+if ($requiresAdminInstall) {
+  Write-Host "Temporary launch succeeded, but the formal Scheduled Task install still needs Administrator PowerShell."
+  Write-Host "Open PowerShell as Administrator and rerun:"
+  Write-Host "`$env:CONTROL_PLANE_URL='$controlPlaneOrigin'"
+  Write-Host "`$installer = Join-Path `$env:TEMP 'codex-mission-control-launcher-install.ps1'"
+  Write-Host "Invoke-WebRequest -UseBasicParsing -Uri `"`$env:CONTROL_PLANE_URL/api/workers/bootstrap?file=local-launcher-install.ps1`" -OutFile `$installer"
+  Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File `$installer -ControlPlaneUrl `$env:CONTROL_PLANE_URL"
+}
 Write-Host "Launcher: http://127.0.0.1:17320"

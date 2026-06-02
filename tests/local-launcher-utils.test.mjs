@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -13,6 +13,7 @@ const {
   getLauncherPaths,
   isWorkerManifestCurrent,
   listLauncherProfiles,
+  loadLauncherConfig,
   loadLauncherProfile,
   mergeLauncherProfileForConnect,
   applyWorkerManifestToProfile,
@@ -78,6 +79,46 @@ test("launcher CORS allows configured app origin and blocks unknown origins", ()
     "https://control-plane.example.com",
   );
   assert.equal(blocked, null);
+});
+
+test("launcher config reports scheduled-task install metadata", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "launcher-config-"));
+  const paths = getLauncherPaths(tempDir);
+  await mkdir(paths.launcherRoot, { recursive: true });
+  await writeFile(
+    paths.configFile,
+    JSON.stringify({
+      allowedOrigins: ["http://localhost:3000"],
+      installedAt: "2026-06-02T00:00:00.000Z",
+      installMode: "temporary-startup-folder",
+      scheduledTaskStatus: "access-denied",
+      requiresAdminInstall: true,
+      scheduledTaskError: "Access is denied.",
+    }),
+    "utf8",
+  );
+
+  const config = await loadLauncherConfig(paths);
+  assert.deepEqual(config.allowedOrigins, ["http://localhost:3000"]);
+  assert.equal(config.installMode, "temporary-startup-folder");
+  assert.equal(config.scheduledTaskStatus, "access-denied");
+  assert.equal(config.requiresAdminInstall, true);
+  assert.equal(config.scheduledTaskError, "Access is denied.");
+
+  await rm(tempDir, { recursive: true, force: true });
+});
+
+test("launcher config defaults install metadata for older installs", async () => {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "launcher-config-old-"));
+  const paths = getLauncherPaths(tempDir);
+
+  const config = await loadLauncherConfig(paths);
+  assert.equal(config.installMode, "unknown");
+  assert.equal(config.scheduledTaskStatus, "unknown");
+  assert.equal(config.requiresAdminInstall, false);
+  assert.equal(config.scheduledTaskError, "");
+
+  await rm(tempDir, { recursive: true, force: true });
 });
 
 test("launcher worker environment preserves runtime inputs without logging secrets", () => {

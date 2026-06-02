@@ -507,15 +507,17 @@ test("blocker summaries dedupe repeated fallback blockers", () => {
 test("blocker summaries explain worker runtime and dirty repo blockers", () => {
   const summaries = summarizeStageGateBlockers([
     "worker_runtime_error: 本機背景 Worker 版本不同步或執行環境異常，請重新下載並重啟 Worker。原始錯誤：ReferenceError: finalizeTeamPrDelivery is not defined",
+    "worker_version_mismatch: 本機背景 Worker 版本不同步，請重新下載並重啟 Worker。原始錯誤：Worker script integrity mismatch.",
     "repo_dirty_blocked: 本機 repo 目前有未提交異動或分支衝突。Cannot prepare the request branch because the selected repo has uncommitted changes.",
   ]);
 
   assert.deepEqual(
     summaries.map((summary) => summary.title),
-    ["本機 Worker 版本不同步", "本機 repo 狀態不乾淨"],
+    ["Worker 內部錯誤", "本機 Worker 版本不同步", "本機 repo 狀態不乾淨"],
   );
-  assert.match(summaries[0].nextAction, /重新下載並重啟 Worker/);
-  assert.match(summaries[1].nextAction, /commit、stash/);
+  assert.match(summaries[0].nextAction, /worker bundle/);
+  assert.match(summaries[1].nextAction, /重新下載並重啟 Worker/);
+  assert.match(summaries[2].nextAction, /commit、stash/);
 });
 
 test("blocker summaries explain verified Work Item branch requirements", () => {
@@ -729,9 +731,30 @@ test("workflow stage gate separates worker runtime errors from Agent blockers", 
   });
 
   assert.equal(stageGate.status, "blocked");
-  assert.equal(stageGate.recoveryKind, "worker_runtime_error");
+  assert.equal(stageGate.recoveryKind, "worker_internal_error");
   assert.equal(stageGate.needsClarification, false);
-  assert.match(stageGate.blockers[0], /Worker 版本不同步/);
+  assert.match(stageGate.blockers[0], /worker_internal_error/);
+});
+
+test("workflow stage gate separates worker version mismatch from internal errors", () => {
+  const blockedRun = sampleRun({
+    runId: "agent0-worker-version",
+    agentRole: "agent0",
+    status: "blocked",
+    error:
+      "worker_version_mismatch: 本機背景 Worker 版本不同步，請重新下載並重啟 Worker。原始錯誤：Worker script integrity mismatch.",
+  });
+  const stageGate = evaluateWorkflowStageGate({
+    request: sampleRequest({ status: "blocked" }),
+    runs: [blockedRun],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(stageGate.status, "blocked");
+  assert.equal(stageGate.recoveryKind, "worker_version_mismatch");
+  assert.equal(stageGate.needsClarification, false);
+  assert.match(stageGate.blockers[0], /worker_version_mismatch/);
 });
 
 test("workflow stage gate separates dirty repo blockers", () => {
