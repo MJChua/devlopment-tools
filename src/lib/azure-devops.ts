@@ -1,5 +1,7 @@
 import {
+  getTeamPrDeliveryPolicyMessage,
   getTestWritePolicyMessage,
+  isTeamPrDeliveryBranch,
   isTestWriteAllowedBranch,
   normalizeBranchName,
 } from "@/lib/test-write-policy";
@@ -793,9 +795,17 @@ export class AzureDevOpsClient {
   }
 
   private assertBranchWriteAllowed(branchOrRef: string) {
-    if (!isTestWriteAllowedBranch(branchOrRef)) {
-      throw new AzureDevOpsError(getTestWritePolicyMessage(branchOrRef), 400);
+    if (isTestWriteAllowedBranch(branchOrRef) || isTeamPrDeliveryBranch(branchOrRef)) {
+      return;
     }
+
+    const branch = normalizeBranchName(branchOrRef);
+    const message = branch.startsWith("feature/") ||
+      branch.startsWith("bug/") ||
+      branch.startsWith("hotfix/")
+      ? getTeamPrDeliveryPolicyMessage(branch)
+      : getTestWritePolicyMessage(branch);
+    throw new AzureDevOpsError(message, 400);
   }
 
   private async getBranches(repositoryId: string): Promise<BranchSummary[]> {

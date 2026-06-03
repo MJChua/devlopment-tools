@@ -188,6 +188,7 @@ async function handleRequest(request, response) {
     const prDiscoverMatch = url.pathname.match(
       /^\/requests\/([^/]+)\/pr-discover$/,
     );
+    const prCreateMatch = url.pathname.match(/^\/requests\/([^/]+)\/pr-create$/);
     const prLinkMatch = url.pathname.match(/^\/requests\/([^/]+)\/pr-link$/);
     if (
       request.method === "POST" &&
@@ -195,6 +196,7 @@ async function handleRequest(request, response) {
         url.pathname === "/azure/work-items" ||
         workItemDetailMatch ||
         prDiscoverMatch ||
+        prCreateMatch ||
         prLinkMatch)
     ) {
       const payload = await readJsonBody(request);
@@ -206,6 +208,8 @@ async function handleRequest(request, response) {
         ? `/api/azure/work-item/${workItemDetailMatch[1]}`
         : prDiscoverMatch
           ? `/api/requests/${encodeURIComponent(prDiscoverMatch[1])}/pr-discover`
+          : prCreateMatch
+            ? `/api/requests/${encodeURIComponent(prCreateMatch[1])}/pr-create`
           : prLinkMatch
             ? `/api/requests/${encodeURIComponent(prLinkMatch[1])}/pr-link`
         : url.pathname === "/azure/iterations"

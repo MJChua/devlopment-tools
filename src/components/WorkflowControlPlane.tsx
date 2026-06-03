@@ -238,6 +238,10 @@ type PullRequestDiscoveryResult = {
   link?: WorkflowRequestDetail["prLinks"][number];
   matches?: PullRequestDiscoveryMatch[];
 };
+type PullRequestCreateResult = PullRequestDiscoveryResult & {
+  created: boolean;
+  pullRequest?: PullRequestDiscoveryMatch;
+};
 type ConnectionPulseTone = "green" | "amber" | "red";
 type StagedRequestAttachment = {
   id: string;
@@ -1096,6 +1100,46 @@ export function WorkflowControlPlane() {
     throw new Error("Azure PAT is required.");
   }
 
+  async function fetchPullRequestCreate(requestId: string) {
+    const payload = {
+      actor: currentOwner,
+      config: DEFAULT_AZURE_CONFIG,
+      confirmWrite: true,
+    };
+    const token = workerForm.azurePat.trim();
+    if (token) {
+      return fetchJson<PullRequestCreateResult>(
+        `/api/requests/${requestId}/pr-create`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            ...payload,
+            credentials: { pat: token },
+          }),
+        },
+      );
+    }
+
+    const workerId =
+      currentWorker?.workerId ||
+      requestForm.assignedWorkerId ||
+      createLocalWorkerId(currentOwner);
+    if (launcherState.available && launcherState.hasAzurePat && workerId) {
+      return fetchLauncherJson<PullRequestCreateResult>(
+        `/requests/${encodeURIComponent(requestId)}/pr-create`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            ...payload,
+            workerId,
+          }),
+        },
+      );
+    }
+
+    throw new Error("Azure PAT is required.");
+  }
+
   async function loadWorkItemIterations(
     options: { silent?: boolean } = {},
   ) {
@@ -1412,6 +1456,36 @@ export function WorkflowControlPlane() {
     }));
     setState("success");
     setMessage("已保留目前阻擋紀錄，並清空表單可建立新需求。");
+    window.setTimeout(() => requestDetailRef.current?.focus(), 0);
+  }
+
+  function startAdjustmentRequest() {
+    if (!selectedRequest) {
+      startNewRequest();
+      return;
+    }
+
+    clearStagedAttachments();
+    setSelectedRequestId("");
+    setActiveWorkspaceTab("new");
+    setRequestForm((current) => ({
+      ...DEFAULT_REQUEST_FORM,
+      owner: current.owner,
+      assignedWorkerId: selectedRequest.assignedWorkerId || current.assignedWorkerId,
+      azureWorkItemId:
+        selectedRequest.azureReferenceType === "work-item"
+          ? selectedRequest.azureReferenceId
+          : "",
+      deliveryMode: selectedRequest.deliveryMode,
+    }));
+    if (selectedRequest.repoPath) {
+      setWorkerForm((current) => ({
+        ...current,
+        repoPath: selectedRequest.repoPath,
+      }));
+    }
+    setState("success");
+    setMessage("已另開調整需求；同一 Azure Work Item 會更新同一個 PR 分支。");
     window.setTimeout(() => requestDetailRef.current?.focus(), 0);
   }
 
@@ -1980,6 +2054,43 @@ export function WorkflowControlPlane() {
       if (!options.silent) {
         setMessage(formatError(error));
       }
+    }
+  }
+
+  async function createOrRefreshPullRequest() {
+    if (!selectedRequest) {
+      return;
+    }
+
+    setPrDiscoveryState("loading");
+    setPrDiscoveryMessage("正在建立或刷新 Azure PR...");
+    setPrDiscoveryMatches([]);
+
+    try {
+      const result = await fetchPullRequestCreate(selectedRequest.requestId);
+      setPrDiscoveryMatches(result.matches ?? []);
+      setPrDiscoveryState("success");
+      setPrDiscoveryMessage(
+        result.created
+          ? result.trace.pullRequestId
+            ? `已建立 Azure Draft PR #${result.trace.pullRequestId}，並完成追蹤。`
+            : "已建立 Azure Draft PR，並完成追蹤。"
+          : result.trace.pullRequestId
+            ? `已找到既有 Azure PR #${result.trace.pullRequestId}，並完成追蹤。`
+            : "已找到既有 Azure PR，並完成追蹤。",
+      );
+
+      await Promise.all([
+        refreshAll(),
+        refreshSelectedRequest(selectedRequest.requestId),
+      ]);
+      setState("success");
+      setMessage("Azure PR 已建立或完成刷新。");
+    } catch (error) {
+      setPrDiscoveryState("error");
+      setPrDiscoveryMessage(formatError(error));
+      setState("error");
+      setMessage(formatError(error));
     }
   }
 
@@ -2839,7 +2950,9 @@ export function WorkflowControlPlane() {
                     form={prLinkForm}
                     hasAzurePat={hasPrDiscoveryAccess}
                     onChange={setPrLinkForm}
+                    onCreateOrRefresh={createOrRefreshPullRequest}
                     onDiscover={() => discoverPullRequestLink()}
+                    onStartAdjustment={startAdjustmentRequest}
                     onSubmit={recordPullRequestLink}
                   />
                 ) : null}
@@ -5214,7 +5327,9 @@ type PullRequestTraceabilityProps = {
   form: { pullRequestId: string };
   hasAzurePat: boolean;
   onChange: (form: { pullRequestId: string }) => void;
+  onCreateOrRefresh: () => void;
   onDiscover: () => void;
+  onStartAdjustment: () => void;
   onSubmit: () => void;
 };
 
@@ -5226,7 +5341,9 @@ function PullRequestTraceabilityPanel({
   form,
   hasAzurePat,
   onChange,
+  onCreateOrRefresh,
   onDiscover,
+  onStartAdjustment,
   onSubmit,
 }: PullRequestTraceabilityProps) {
   const canSubmit = hasAzurePat && Boolean(form.pullRequestId.trim());
@@ -5291,6 +5408,19 @@ function PullRequestTraceabilityPanel({
       ) : null}
       <div className="mt-3 flex flex-wrap gap-2">
         <button
+          className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-900 bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300"
+          disabled={!hasAzurePat || discoveryState === "loading"}
+          onClick={onCreateOrRefresh}
+          type="button"
+        >
+          {discoveryState === "loading" ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <GitPullRequest className="h-4 w-4" />
+          )}
+          建立/刷新 Azure PR
+        </button>
+        <button
           className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
           disabled={!hasAzurePat || discoveryState === "loading" || hasTrackedPr}
           onClick={onDiscover}
@@ -5302,6 +5432,14 @@ function PullRequestTraceabilityPanel({
             <RefreshCw className="h-4 w-4" />
           )}
           重新偵測
+        </button>
+        <button
+          className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800"
+          onClick={onStartAdjustment}
+          type="button"
+        >
+          <Plus className="h-4 w-4" />
+          另開調整需求
         </button>
       </div>
       <details className="mt-3 rounded-md border border-slate-200 bg-white">

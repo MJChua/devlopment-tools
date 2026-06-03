@@ -531,6 +531,16 @@ test("blocker summaries explain verified Work Item branch requirements", () => {
   assert.match(summaries[0].nextAction, /Azure Work Item/);
 });
 
+test("blocker summaries explain outdated PR branches", () => {
+  const summaries = summarizeStageGateBlockers([
+    "pr_branch_outdated: Formal PR branch is behind origin/develop. The worker will not merge or rebase origin/develop automatically.",
+  ]);
+
+  assert.equal(summaries.length, 1);
+  assert.equal(summaries[0].title, "PR 分支落後 develop");
+  assert.match(summaries[0].nextAction, /Agent2/);
+});
+
 test("blocker summaries merge UI-only target and expectation gaps", () => {
   const summaries = summarizeStageGateBlockers([
     [
@@ -776,6 +786,27 @@ test("workflow stage gate separates dirty repo blockers", () => {
   assert.equal(stageGate.recoveryKind, "repo_dirty_blocked");
   assert.equal(stageGate.needsClarification, false);
   assert.match(stageGate.blockers[0], /未提交異動/);
+});
+
+test("workflow stage gate separates outdated PR branch blockers", () => {
+  const blockedRun = sampleRun({
+    runId: "agent2-outdated-branch",
+    agentRole: "agent2",
+    status: "blocked",
+    error:
+      "pr_branch_outdated: Formal PR branch is behind origin/develop. Update the branch manually in Azure Repos or Git, then rerun Agent2.",
+  });
+  const stageGate = evaluateWorkflowStageGate({
+    request: sampleRequest({ status: "blocked" }),
+    runs: [blockedRun],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(stageGate.status, "blocked");
+  assert.equal(stageGate.recoveryKind, "pr_branch_outdated");
+  assert.equal(stageGate.needsClarification, false);
+  assert.match(stageGate.blockers[0], /pr_branch_outdated/);
 });
 
 test("workflow waits for Local Worker/Codex interpretation before high-risk stop", () => {

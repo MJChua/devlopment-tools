@@ -530,8 +530,25 @@ async function prepareExecutionRepository(run, repoPath, progress) {
   }
   const baseRef = await resolveWorktreeBaseRef(repoPath, Boolean(trace.sourceBranch));
   const worktreeRoot = path.join(path.dirname(repoPath), ".codex-request-worktrees");
-  const worktreePath = path.join(worktreeRoot, sanitizePathSegment(run.requestId));
+  const worktreePath = path.join(
+    worktreeRoot,
+    trace.sourceBranch
+      ? sanitizePathSegment(trace.sourceBranch.replaceAll("/", "-"))
+      : sanitizePathSegment(run.requestId),
+  );
   await mkdir(worktreeRoot, { recursive: true });
+
+  const existingBranchWorktree = trace.sourceBranch
+    ? await findExistingWorktreeByBranch(repoPath, trace.sourceBranch)
+    : "";
+  if (existingBranchWorktree) {
+    await ensureCleanGitWorktree(
+      existingBranchWorktree,
+      `Cannot reuse ${trace.sourceBranch} because its worktree has uncommitted changes from an earlier run.`,
+    );
+    await ensurePrBranchIncludesDevelop(existingBranchWorktree, trace.sourceBranch);
+    return { repoPath: existingBranchWorktree };
+  }
 
   const existingWorktree = await findExistingWorktree(repoPath, worktreePath);
   if (existingWorktree) {
@@ -539,18 +556,38 @@ async function prepareExecutionRepository(run, repoPath, progress) {
       existingWorktree,
       "Cannot reuse the request worktree because it has uncommitted changes from an earlier run.",
     );
+    if (
+      trace.sourceBranch &&
+      !(await isWorktreeOnBranch(existingWorktree, trace.sourceBranch))
+    ) {
+      throw new Error(
+        `Cannot reuse ${worktreePath} because it is not on ${trace.sourceBranch}. Remove or move the stale request worktree, then rerun Agent2.`,
+      );
+    }
+    if (trace.sourceBranch) {
+      await ensurePrBranchIncludesDevelop(existingWorktree, trace.sourceBranch);
+    }
     return { repoPath: existingWorktree };
   }
 
   const branchExists = await gitRefExists(repoPath, `refs/heads/${branchName}`);
+  const remoteBranchExists = trace.sourceBranch
+    ? await gitRefExists(repoPath, `refs/remotes/origin/${branchName}`)
+    : false;
   const addCommand = branchExists
     ? `git worktree add ${quote(worktreePath)} ${quote(branchName)}`
-    : `git worktree add -b ${quote(branchName)} ${quote(worktreePath)} ${quote(baseRef)}`;
+    : remoteBranchExists
+      ? `git worktree add -b ${quote(branchName)} ${quote(worktreePath)} ${quote(`origin/${branchName}`)}`
+      : `git worktree add -b ${quote(branchName)} ${quote(worktreePath)} ${quote(baseRef)}`;
   const addResult = await runCommand(addCommand, repoPath, {}, 120000);
   if (addResult.exitCode !== 0) {
     throw new Error(
       `Cannot prepare request-scoped worktree for ${run.requestId}: ${addResult.output.trim()}`,
     );
+  }
+
+  if (trace.sourceBranch) {
+    await ensurePrBranchIncludesDevelop(worktreePath, trace.sourceBranch);
   }
 
   return { repoPath: worktreePath };
@@ -604,6 +641,89 @@ async function findExistingWorktree(repoPath, worktreePath) {
     .map((line) => line.slice("worktree ".length).trim())
     .find((candidate) => path.resolve(candidate).toLowerCase() === normalizedTarget);
   return existing || "";
+}
+
+async function findExistingWorktreeByBranch(repoPath, branchName) {
+  const worktrees = await listGitWorktrees(repoPath);
+  const match = worktrees.find((worktree) => worktree.branch === branchName);
+  return match?.path || "";
+}
+
+async function listGitWorktrees(repoPath) {
+  const result = await runCommand("git worktree list --porcelain", repoPath, {}, 15000);
+  if (result.exitCode !== 0) {
+    return [];
+  }
+
+  const worktrees = [];
+  let current = null;
+  for (const line of parseCommandOutputLines(result.output)) {
+    if (line.startsWith("worktree ")) {
+      if (current) {
+        worktrees.push(current);
+      }
+      current = { path: line.slice("worktree ".length).trim(), branch: "" };
+      continue;
+    }
+
+    if (current && line.startsWith("branch ")) {
+      current.branch = normalizeWorktreeBranch(line.slice("branch ".length));
+    }
+  }
+
+  if (current) {
+    worktrees.push(current);
+  }
+
+  return worktrees;
+}
+
+function normalizeWorktreeBranch(value) {
+  return String(value || "").trim().replace(/^refs\/heads\//, "");
+}
+
+async function isWorktreeOnBranch(worktreePath, branchName) {
+  const result = await runCommand(
+    "git rev-parse --abbrev-ref HEAD",
+    worktreePath,
+    {},
+    15000,
+  );
+  return result.exitCode === 0 && result.output.trim() === branchName;
+}
+
+async function ensurePrBranchIncludesDevelop(worktreePath, branchName) {
+  const develop = await runCommand(
+    "git rev-parse --verify origin/develop",
+    worktreePath,
+    {},
+    15000,
+  );
+  if (develop.exitCode !== 0) {
+    throw new Error(
+      "Cannot validate the request branch because origin/develop was not found.",
+    );
+  }
+
+  const result = await runCommand(
+    "git merge-base --is-ancestor origin/develop HEAD",
+    worktreePath,
+    {},
+    15000,
+  );
+  if (result.exitCode === 0) {
+    return;
+  }
+
+  if (result.exitCode === 1) {
+    throw new Error(
+      `PR branch ${branchName} is behind origin/develop. Update the branch manually in Azure Repos or Git, then rerun Agent2. The worker will not merge or rebase origin/develop automatically.`,
+    );
+  }
+
+  throw new Error(
+    `Cannot compare ${branchName} with origin/develop: ${result.output.trim()}`,
+  );
 }
 
 async function runGitOrThrow(command, cwd, timeoutMs = 120000) {
@@ -882,35 +1002,14 @@ async function finalizeTeamPrDelivery(run, repoPath, progress) {
 
   progress.setProgress(
     "Pushing PR branch",
-    `Pushing ${trace.sourceBranch} to origin before merging origin/develop.`,
+    `Pushing ${trace.sourceBranch} to origin.`,
   );
   await runGitOrThrow(`git push -u origin ${quote(trace.sourceBranch)}`, repoPath, 120000);
-  await ensureCleanGitWorktree(
-    repoPath,
-    "Cannot merge origin/develop because the request branch is not clean after commit.",
-  );
-
-  progress.setProgress(
-    "Merging develop into request branch",
-    `Merging origin/develop into ${trace.sourceBranch}.`,
-  );
-  await runGitOrThrow("git fetch origin", repoPath, 120000);
-  await runGitOrThrow("git merge --no-edit origin/develop", repoPath, 120000);
-  await ensureCleanGitWorktree(
-    repoPath,
-    "Cannot finish PR branch preparation because the merge from origin/develop left local changes.",
-  );
-
-  progress.setProgress(
-    "Pushing updated PR branch",
-    `Pushing ${trace.sourceBranch} after merging origin/develop.`,
-  );
-  await runGitOrThrow(`git push origin ${quote(trace.sourceBranch)}`, repoPath, 120000);
 
   return [
     `Committed and pushed ${trace.sourceBranch}.`,
     `Commit message: ${commitMessage}`,
-    "Merged origin/develop into the request branch and pushed again.",
+    "The worker did not merge or rebase origin/develop into the request branch.",
   ].join("\n");
 }
 
@@ -996,6 +1095,10 @@ function formatBlockedWorkerError(error) {
     return `worker_internal_error: 本機背景 Worker 內部錯誤，請更新/重啟 Worker；若仍同錯，表示 App 提供的 worker bundle 需要修復。原始錯誤：${message}`;
   }
 
+  if (isPrBranchOutdatedError(message)) {
+    return `pr_branch_outdated: Formal PR branch is behind origin/develop. Update the branch manually in Azure Repos or Git, then rerun Agent2. Original error: ${message}`;
+  }
+
   if (isRepoDirtyError(message)) {
     return `repo_dirty_blocked: 本機 repo 目前有未提交異動或分支衝突。${message}`;
   }
@@ -1013,6 +1116,12 @@ function isWorkerInternalError(error, message) {
 
 function isRepoDirtyError(message) {
   return /working tree is not clean|repo is not clean|uncommitted changes|unresolved merge conflict|merge conflict/i.test(
+    message,
+  );
+}
+
+function isPrBranchOutdatedError(message) {
+  return /behind origin\/develop|will not merge or rebase origin\/develop/i.test(
     message,
   );
 }

@@ -138,6 +138,21 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
   }
 
   if (
+    normalized.includes("pr_branch_outdated") ||
+    (normalized.includes("behind origin/develop") &&
+      normalized.includes("will not merge or rebase"))
+  ) {
+    return {
+      title: "PR 分支落後 develop",
+      reason:
+        "正式 PR 分支目前不包含最新 origin/develop；Worker 不會自動 merge 或 rebase，避免本地改寫 PR 分支。",
+      nextAction:
+        "先在 Azure Repos 或本機 Git 由人工更新該分支，確認乾淨後再重跑 Agent2。",
+      original,
+    };
+  }
+
+  if (
     normalized.includes("agent3 delivery review blocked") ||
     normalized.includes("delivery review blocked") ||
     normalized.includes("pr-ready") ||

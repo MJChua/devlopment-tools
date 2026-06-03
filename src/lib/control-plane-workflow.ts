@@ -89,6 +89,7 @@ export type StageGateRecoveryKind =
   | "worker_internal_error"
   | "worker_version_mismatch"
   | "repo_dirty_blocked"
+  | "pr_branch_outdated"
   | "stale_run"
   | "human_decision";
 export type ClarificationPromptOption = {
@@ -1956,6 +1957,15 @@ export function isRepoDirtyBlockedRun(run: Pick<WorkerRun, "error" | "artifact">
   );
 }
 
+export function isPrBranchOutdatedRun(run: Pick<WorkerRun, "error" | "artifact">) {
+  const text = `${run.error}\n${run.artifact}`.toLowerCase();
+  return (
+    text.includes("pr_branch_outdated") ||
+    (text.includes("behind origin/develop") &&
+      text.includes("will not merge or rebase"))
+  );
+}
+
 export function isRunHeartbeatStale(
   run: Pick<WorkerRun, "updatedAt">,
   now = Date.now(),
@@ -2008,6 +2018,10 @@ export function evaluateWorkflowStageGate(
     } else if (isRepoDirtyBlockedRun(failedRun)) {
       blockers.push(
         `本機 repo 目前有未提交異動或分支衝突：${failedRun.error || "請先處理工作區狀態。"}`,
+      );
+    } else if (isPrBranchOutdatedRun(failedRun)) {
+      blockers.push(
+        `pr_branch_outdated: Formal PR branch is behind origin/develop. Update the branch manually in Azure Repos or Git, then rerun Agent2. ${failedRun.error || ""}`,
       );
     } else {
       blockers.push(
@@ -2132,6 +2146,7 @@ export function evaluateWorkflowStageGate(
       ? isWorkerVersionMismatchRun(failedRun)
       : false;
     const repoDirtyBlocked = failedRun ? isRepoDirtyBlockedRun(failedRun) : false;
+    const prBranchOutdated = failedRun ? isPrBranchOutdatedRun(failedRun) : false;
     const clarificationPrompt = failedRun
       ? extractClarificationPromptFromArtifact(failedRun.artifact)
       : null;
@@ -2153,9 +2168,11 @@ export function evaluateWorkflowStageGate(
               ? "worker_version_mismatch"
               : repoDirtyBlocked
                 ? "repo_dirty_blocked"
-                : failedRun.status === "failed"
-                  ? "agent_failed"
-                  : "agent_blocked"
+                : prBranchOutdated
+                  ? "pr_branch_outdated"
+                  : failedRun.status === "failed"
+                    ? "agent_failed"
+                    : "agent_blocked"
         : "none",
       canAutoRepair,
       canManualRetry: Boolean(failedRun),
@@ -2163,7 +2180,8 @@ export function evaluateWorkflowStageGate(
         failedRun &&
           !isHandoffSchemaRun(failedRun) &&
           !workerRuntimeError &&
-          !repoDirtyBlocked,
+          !repoDirtyBlocked &&
+          !prBranchOutdated,
       ),
       clarificationPrompt,
     });

@@ -256,6 +256,30 @@ function buildSmokeAgentArtifact(agentRole) {
     ].join("\n");
   }
 
+  if (agentRole === "agent3") {
+    return [
+      "# Delivery Report",
+      "",
+      "## Review Result",
+      "- pass: no-PR smoke workflow evidence is acceptable.",
+      "",
+      "## Scope Compliance",
+      "- pass: smoke did not modify repository files.",
+      "",
+      "## Unapproved Changes",
+      "- none.",
+      "",
+      "## Verification Result",
+      "- pass: smoke workflow continuation completed.",
+      "",
+      "## Regression Risk",
+      "- low.",
+      "",
+      "## Human Decisions",
+      "- none.",
+    ].join("\n");
+  }
+
   return `# ${agentRole} Artifact\n\nCompleted.`;
 }
 

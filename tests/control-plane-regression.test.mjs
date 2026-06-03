@@ -117,6 +117,38 @@ test("local worker explains verified Work Item requirement for formal PR branche
   assert.match(source, /feature\/\{id\}, bug\/\{id\}, or hotfix\/\{id\}/);
 });
 
+test("local worker pushes formal PR branches without merging develop locally", () => {
+  const source = readFileSync(
+    new URL("../scripts/local-worker.mjs", import.meta.url),
+    "utf8",
+  );
+
+  assert.doesNotMatch(source, /git merge --no-edit origin\/develop/);
+  assert.doesNotMatch(source, /Merging origin\/develop/);
+  assert.match(source, /git merge-base --is-ancestor origin\/develop HEAD/);
+  assert.match(source, /pr_branch_outdated/);
+  assert.match(source, /origin\/\$\{branchName\}/);
+  assert.equal((source.match(/git push/g) ?? []).length, 1);
+});
+
+test("request-scoped PR create route refreshes existing Azure PR before creating one", () => {
+  const routeSource = readFileSync(
+    new URL("../src/app/api/requests/[requestId]/pr-create/route.ts", import.meta.url),
+    "utf8",
+  );
+  const launcherSource = readFileSync(
+    new URL("../scripts/local-launcher.mjs", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(routeSource, /findActivePullRequestsForBranches/);
+  assert.match(routeSource, /client\.createPullRequest/);
+  assert.match(routeSource, /linkPullRequestToWorkflow/);
+  assert.match(routeSource, /confirmWrite/);
+  assert.match(routeSource, /isTeamPrDeliveryBranch/);
+  assert.match(launcherSource, /pr-create/);
+});
+
 test("Work Item filter WIQL does not exclude states or types by default", () => {
   const query = buildWorkItemFilterQuery();
 

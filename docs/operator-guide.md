@@ -157,16 +157,16 @@ Not required for the MVP:
    - Update PR description marker block.
    - Post readiness comment.
    - Link existing Work Item.
-14. When the request uses PR delivery, the App automatically discovers the active Azure PR for the pushed request branch and records it for traceability. Manual PR ID entry remains a fallback only.
+14. When the request uses PR delivery, the App can create or refresh the Draft Azure PR for the pushed request branch, then records the active PR for traceability. Manual PR ID entry remains a fallback only.
 
 ## Delivery Modes
 
 Each request stores a delivery mode:
 
-- `draft_pr`: the default team delivery mode. Agent2 works from `origin/develop` on `feature/{workItemId}`, `bug/{workItemId}`, or `hotfix/{workItemId}` when a verified Azure Work Item is linked. Agent3 completion moves the request to PR Ready, then the App discovers and tracks the active Azure PR before the request is marked PR Created / Tracked.
+- `draft_pr`: the default team delivery mode. Agent2 works from `origin/develop` on `feature/{workItemId}`, `bug/{workItemId}`, or `hotfix/{workItemId}` when a verified Azure Work Item is linked. Agent3 completion moves the request to PR Ready, then the App creates or refreshes the Draft Azure PR before the request is marked PR Created / Tracked.
 - `no_pr`: for personal project changes or work that does not need PR publication. Agent0 through Agent3 still run, Agent3 still reviews the result, and the App marks the request delivered after Agent3 completes.
 
-The workflow does not create, merge, abandon, approve, deploy, or update Azure PRs. It prepares and pushes the request branch, then reads Azure Repos to track the PR that appears for that branch.
+The workflow may create a Draft Azure PR for a verified request branch. It does not merge, abandon, approve, deploy, update branch policy, or update Work Item fields.
 
 ## Natural-Language Request Intake
 
@@ -222,19 +222,22 @@ The App evaluates workflow status automatically and refreshes selected request p
 
 Every Azure write must pass both UI confirmation and server-side validation.
 
-Testing-stage write policy:
+Testing-stage diagnostic write policy:
 
 - Only PRs whose source branch is under `AITraining/*` may use Azure write actions.
-- All other branches are read-only in the App, even if the PAT has write scopes.
+- Generic Azure PR diagnostics keep all other branches read-only, even if the PAT has write scopes.
 - `AI_Training/*` remains a recognized test branch for rule classification, but it is not writable during this testing stage.
+- Request-scoped workflow PR creation is separate and may use verified formal team branches only.
 
 Formal PR delivery branch policy:
 
 - Team delivery branches are `feature/{workItemId}`, `bug/{workItemId}`, or `hotfix/{workItemId}`.
 - The target/base branch is `develop`.
-- These branches are used for local git commit/push and Azure PR discovery. They do not allow the App to merge, abandon, approve, deploy, or mutate Work Item fields.
+- These branches are used for local git commit/push, Azure PR creation/refresh, and Azure PR discovery. They do not allow the App to merge, abandon, approve, deploy, or mutate Work Item fields.
 - The `{workItemId}` must come from a verified Azure Work Item read. A number parsed only from request text is a tracking reference and must not derive the formal PR branch.
 - Branch names use only the kind and Work Item number. Do not add title, slug, date, or other suffixes.
+- The Local Worker never merges or rebases `origin/develop` into the request branch. If the branch is behind `origin/develop`, the workflow blocks until a human updates the branch in Azure Repos or Git.
+- A later adjustment must be created as a new request. If it uses the same Azure Work Item, it updates the same source branch and the same active Azure PR.
 
 Allowed MVP writes:
 
@@ -247,7 +250,7 @@ Before linking a Work Item, the App must read that Work Item and show its identi
 
 Candidate search is read-only. It uses PR branch, title, and description context to infer possible Work Item IDs, then reads Azure Boards metadata for display. Selecting a candidate only fills the link input.
 
-PR traceability is verified before it changes workflow state. The App first tries to discover an active Azure PR whose source branch is the request branch and whose target branch is `develop`. A verified link may move `PR Ready` to `PR Created`, but it does not merge, abandon, deploy, or update Work Item fields. Manual PR ID entry is only a fallback when discovery is delayed or ambiguous.
+PR traceability is verified before it changes workflow state. The App first tries to find an active Azure PR whose source branch is the request branch and whose target branch is `develop`; if none exists, the request-scoped action creates a Draft PR. A verified link may move `PR Ready` to `PR Created`, but it does not merge, abandon, deploy, or update Work Item fields. Manual PR ID entry is only a fallback when discovery is delayed or ambiguous.
 
 Blocked or deferred:
 
