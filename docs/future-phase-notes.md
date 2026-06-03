@@ -31,6 +31,23 @@ Current decision:
 - Linking an existing Work Item to an active PR is allowed in the MVP as a guarded write.
 - Hotfix target policy remains pending.
 
+### Hotfix Release Target Policy
+
+Status: pending product decision
+
+Confirmed MVP boundary:
+
+- `HOTFIX` requests may be classified during intake.
+- A verified Azure Work Item may derive `hotfix/{workItemId}` for formal PR delivery.
+- The current request delivery base remains `develop`.
+- The App, Codex, and Local Worker must not infer production release routing from the `HOTFIX` request kind alone.
+
+Open decisions:
+
+- Whether production hotfix PRs target `develop`, `main`, `release/*`, or another protected branch.
+- What approval, build, deployment, rollback, and audit evidence is required before a hotfix can ship.
+- Whether hotfix delivery needs a separate operator confirmation or permission scope.
+
 AI-operable candidates for later phases, still requiring explicit product rules:
 
 - Assign reviewers.

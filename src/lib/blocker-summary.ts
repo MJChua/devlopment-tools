@@ -285,7 +285,7 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
     return {
       title: "Agent 明確標記為 blocked",
       reason: "Agent 判定目前資訊不足，尚不能安全交給下一階段。",
-      nextAction: "查看其他阻擋原因，補齊缺口後重跑同一 Agent。",
+      nextAction: "查看其他阻擋原因，補齊缺口後重跑 Agent。",
       original,
     };
   }
@@ -293,7 +293,7 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
   return {
     title: "需要人工確認",
     reason: "Agent 回報有資訊缺口或風險，主流程暫停以避免錯誤實作。",
-    nextAction: "閱讀原文技術細節，補上最小必要資料後重跑同一 Agent。",
+    nextAction: "閱讀原文技術細節，補上最小必要資料後重跑 Agent。",
     original,
   };
 }

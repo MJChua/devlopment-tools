@@ -494,11 +494,23 @@ export function WorkflowControlPlane() {
     ? "border border-red-200 bg-white text-red-700 disabled:bg-slate-100 disabled:text-slate-400"
     : "border border-slate-900 bg-slate-900 text-white disabled:border-slate-300 disabled:bg-slate-300";
   const visibleRequests = useMemo(
-    () => requests.filter((request) => request.owner === currentOwner),
-    [currentOwner, requests],
+    () =>
+      requests.filter(
+        (request) =>
+          request.owner === currentOwner &&
+          isRequestForSelectedRepository(request, selectedRepoPath),
+      ),
+    [currentOwner, requests, selectedRepoPath],
+  );
+  const selectedRequestIsVisible = Boolean(
+    selectedRequest &&
+      visibleRequests.some(
+        (request) => request.requestId === selectedRequest.requestId,
+      ),
   );
   const selectedRequestNeedsAttention = Boolean(
-    selectedRequest &&
+    selectedRequestIsVisible &&
+      selectedRequest &&
       (isActiveWorkflowStage(selectedRequest.status) ||
         selectedRequest.status === "blocked"),
   );
@@ -616,6 +628,35 @@ export function WorkflowControlPlane() {
       window.localStorage.removeItem(SELECTED_REQUEST_STORAGE_KEY);
     }
   }, [selectedRequestId, selectedRequestStorageReady]);
+
+  useEffect(() => {
+    if (!selectedRequestId || requests.length === 0) {
+      return;
+    }
+
+    const selectedExists = requests.some(
+      (request) => request.requestId === selectedRequestId,
+    );
+    const selectedVisible = visibleRequests.some(
+      (request) => request.requestId === selectedRequestId,
+    );
+    if (!selectedExists || selectedVisible) {
+      return;
+    }
+
+    const hiddenRequestId = selectedRequestId;
+    const clearHiddenRequest = window.setTimeout(() => {
+      if (selectedRequestIdRef.current !== hiddenRequestId) {
+        return;
+      }
+
+      setSelectedRequestId("");
+      setDetail(null);
+      setStageGate(null);
+    }, 0);
+
+    return () => window.clearTimeout(clearHiddenRequest);
+  }, [requests, selectedRequestId, visibleRequests]);
 
   useEffect(() => {
     if (!recentlySubmittedRequestId) {
@@ -1911,6 +1952,14 @@ export function WorkflowControlPlane() {
     });
   }
 
+  async function rerunAgent() {
+    const hasRecoveryInput =
+      recoveryNote.trim().length > 0 || recoveryAttachments.length > 0;
+    await recoverAgent(
+      hasRecoveryInput ? "clarify_and_retry" : "retry_same_agent",
+    );
+  }
+
   function openQuickClarificationDialog() {
     setDismissedClarificationDialogKey("");
   }
@@ -2777,7 +2826,7 @@ export function WorkflowControlPlane() {
                     type="button"
                   >
                     <div className="min-w-0 break-words font-semibold text-slate-950">
-                      {request.title}
+                      {formatRequestDisplayTitle(request)}
                     </div>
                     <div className="mt-1 break-all font-mono text-xs text-slate-500">
                       {request.requestId}
@@ -2821,7 +2870,7 @@ export function WorkflowControlPlane() {
                         {selectedRequest.kind} / {selectedRequest.taskLevel}
                       </div>
                       <h2 className="mt-1 break-words text-xl font-semibold text-slate-950">
-                        {selectedRequest.title}
+                        {formatRequestDisplayTitle(selectedRequest)}
                       </h2>
                       <div className="mt-1 break-all font-mono text-xs text-slate-500">
                         {selectedRequest.requestId}
@@ -2895,7 +2944,6 @@ export function WorkflowControlPlane() {
                     stageGate={stageGate}
                     worker={selectedWorker}
                     onChangeNote={setSelectedRecoveryNote}
-                    onClarifyAndRetry={() => recoverAgent("clarify_and_retry")}
                     onOpenQuickClarification={openQuickClarificationDialog}
                     onPasteAttachment={handleRecoveryNotePaste}
                     onRefreshWorker={() =>
@@ -2903,7 +2951,7 @@ export function WorkflowControlPlane() {
                     }
                     onRemoveAttachment={removeRecoveryAttachment}
                     onSelectAttachmentFiles={handleRecoveryAttachmentFileChange}
-                    onManualRetry={() => recoverAgent("retry_same_agent")}
+                    onRerunAgent={rerunAgent}
                     onStartNewRequest={startNewRequest}
                     onSync={() =>
                       selectedRequestId &&
@@ -3770,13 +3818,12 @@ function BlockerRecoveryPanel({
   worker,
   launcherHasProfile,
   onChangeNote,
-  onClarifyAndRetry,
   onOpenQuickClarification,
   onPasteAttachment,
   onRefreshWorker,
   onRemoveAttachment,
   onSelectAttachmentFiles,
-  onManualRetry,
+  onRerunAgent,
   onStartNewRequest,
   onSync,
   onSyncOutput,
@@ -3791,13 +3838,12 @@ function BlockerRecoveryPanel({
   stageGate: StageGateResult;
   worker: WorkerRegistration | null;
   onChangeNote: (value: string) => void;
-  onClarifyAndRetry: () => void;
   onOpenQuickClarification: () => void;
   onPasteAttachment: (event: ClipboardEvent<HTMLTextAreaElement>) => void;
   onRefreshWorker: () => void;
   onRemoveAttachment: (attachmentId: string) => void;
   onSelectAttachmentFiles: (event: ChangeEvent<HTMLInputElement>) => void;
-  onManualRetry: () => void;
+  onRerunAgent: () => void;
   onStartNewRequest: () => void;
   onSync: () => void;
   onSyncOutput: () => void;
@@ -3819,8 +3865,7 @@ function BlockerRecoveryPanel({
     stageGate.needsClarification &&
     Boolean(stageGate.blockedRunId) &&
     !hasOpenRun;
-  const hasClarificationInput =
-    note.trim().length > 0 || recoveryAttachments.length > 0;
+  const canRerunAgent = canManualRetry || canClarifyAndRetry;
   const canSyncOutput =
     stageGate.recoveryKind === "handoff_schema" &&
     Boolean(stageGate.blockedRunId) &&
@@ -3912,7 +3957,7 @@ function BlockerRecoveryPanel({
           <div className="font-semibold">Worker 內部錯誤</div>
           <p className="mt-1">
             錯誤發生在本機 Worker 自己的執行或收尾邏輯。先更新/重啟
-            Worker，之後重跑同一個 Agent；如果仍出現同一錯誤，表示 App
+            Worker，之後重跑 Agent；如果仍出現同一錯誤，表示 App
             提供的 worker bundle 需要修復。
           </p>
           <Button
@@ -3935,7 +3980,7 @@ function BlockerRecoveryPanel({
       {stageGate.clarificationPrompt ? (
         <div className="mt-3 flex flex-col gap-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm leading-6 text-blue-900 sm:flex-row sm:items-center sm:justify-between">
           <span>
-            Agent1 已列出可選項，選完後會重跑同一個 Agent 繼續確認範圍。
+            Agent1 已列出可選項，選完後會重跑 Agent 繼續確認範圍。
           </span>
           <Button
             className="w-full shrink-0 gap-2 sm:w-auto"
@@ -3960,7 +4005,7 @@ function BlockerRecoveryPanel({
         <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-900">
           {stageGate.canAutoRepair
             ? "Handoff 欄位缺失，server 會自動修復一次。"
-            : "請重跑同一個 Agent。"}
+            : "請重跑 Agent。"}
         </p>
       ) : null}
 
@@ -3968,20 +4013,20 @@ function BlockerRecoveryPanel({
         <div className="mt-3 flex flex-col gap-2">
           <label className="flex flex-col gap-1">
             <span className="text-xs font-semibold text-slate-600">
-              人工補充內容
+              補充內容
             </span>
             <textarea
               className="min-h-24 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm leading-6 outline-none focus:border-blue-500"
               onChange={(event) => onChangeNote(event.target.value)}
               onPaste={onPasteAttachment}
-              placeholder="補充文字或貼截圖。"
+              placeholder="需要補充時可輸入文字或貼上截圖；直接重跑也可以。"
               value={note}
             />
           </label>
           <div className="flex flex-wrap items-center gap-2">
             <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 hover:border-blue-300">
               <Upload className="h-4 w-4" />
-              選取截圖
+              加入截圖
               <input
                 accept="image/png,image/jpeg,image/webp,image/gif"
                 className="sr-only"
@@ -3994,7 +4039,7 @@ function BlockerRecoveryPanel({
           <StagedAttachmentList
             attachments={recoveryAttachments}
             onRemove={onRemoveAttachment}
-            title="人工補件截圖"
+            title="補充截圖"
           />
         </div>
       ) : null}
@@ -4016,11 +4061,11 @@ function BlockerRecoveryPanel({
             重新同步 Agent 輸出
           </Button>
         ) : null}
-        {canManualRetry ? (
+        {canRerunAgent ? (
           <Button
             className="gap-2"
             disabled={loading}
-            onClick={onManualRetry}
+            onClick={onRerunAgent}
             type="button"
             variant="outline"
           >
@@ -4029,23 +4074,7 @@ function BlockerRecoveryPanel({
             ) : (
               <Play className="h-4 w-4" />
             )}
-            重跑同一 Agent
-          </Button>
-        ) : null}
-        {stageGate.needsClarification ? (
-          <Button
-            className="gap-2"
-            disabled={!canClarifyAndRetry || !hasClarificationInput || loading}
-            onClick={onClarifyAndRetry}
-            type="button"
-            variant="outline"
-          >
-            {loading ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Play className="h-4 w-4" />
-            )}
-            補充後重跑 Agent
+            重跑 Agent
           </Button>
         ) : null}
         <Button
@@ -4102,6 +4131,35 @@ function ToastHost({
       )}
       {message}
     </div>
+  );
+}
+
+function formatRequestDisplayTitle(request: WorkflowRequest) {
+  const title = request.title.trim();
+  if (!title || isEnglishPlaceholderTitle(title)) {
+    return "未命名需求";
+  }
+
+  return title;
+}
+
+function isEnglishPlaceholderTitle(title: string) {
+  return title.trim().toLowerCase() === "short human-readable title";
+}
+
+function formatInterpretationSummary(summary: string) {
+  const trimmed = summary.trim();
+  if (!trimmed || isEnglishPlaceholderSummary(trimmed)) {
+    return "需求摘要待本機 Codex 重新判讀，請以需求內容與來源確認為準。";
+  }
+
+  return trimmed;
+}
+
+function isEnglishPlaceholderSummary(summary: string) {
+  return (
+    summary.trim().toLowerCase() ===
+    "classification summary; do not claim sources are confirmed"
   );
 }
 
@@ -4939,7 +4997,9 @@ function InterpretationPreview({
           value={formatPublicNextStep(interpretation.suggestedNextAgent)}
         />
       </div>
-      <p className="text-sm text-slate-700">{interpretation.summary}</p>
+      <p className="text-sm text-slate-700">
+        {formatInterpretationSummary(interpretation.summary)}
+      </p>
       <InlineList
         title="需要確認的來源"
         items={interpretation.missingSources}
@@ -5064,7 +5124,9 @@ function BackgroundJobBanner({
             <span>背景工作狀態</span>
           </div>
           <p className="mt-1 truncate text-sm text-slate-600">
-            {message || request?.title || "App 正在更新處理進度。"}
+            {message ||
+              (request ? formatRequestDisplayTitle(request) : "") ||
+              "App 正在更新處理進度。"}
           </p>
         </div>
         <div className="grid min-w-0 gap-2 sm:grid-cols-4 lg:min-w-[620px]">
@@ -6011,6 +6073,18 @@ function getRepositoryDisplayName(
   return matched?.name || getPathLeaf(repoPath);
 }
 
+function isRequestForSelectedRepository(
+  request: Pick<WorkflowRequest, "repoPath">,
+  selectedRepoPath: string,
+) {
+  const normalizedSelectedRepo = normalizeRepositoryPath(selectedRepoPath);
+  if (!normalizedSelectedRepo) {
+    return true;
+  }
+
+  return normalizeRepositoryPath(request.repoPath) === normalizedSelectedRepo;
+}
+
 function normalizeRepositoryPath(repoPath: string) {
   return repoPath.replace(/\\/g, "/").replace(/\/+$/g, "").toLowerCase();
 }
@@ -6166,7 +6240,7 @@ function formatRecoveryPanelSummary(stageGate: StageGateResult) {
   }
 
   if (stageGate.recoveryKind === "worker_internal_error") {
-    return "Worker 內部錯誤，需更新/重啟後重跑同一 Agent。";
+    return "Worker 內部錯誤，需更新/重啟後重跑 Agent。";
   }
 
   if (stageGate.recoveryKind === "repo_dirty_blocked") {
@@ -6174,7 +6248,7 @@ function formatRecoveryPanelSummary(stageGate: StageGateResult) {
   }
 
   if (stageGate.needsClarification) {
-    return "補充後重跑同一 Agent。";
+    return "重跑 Agent；若有補充內容會一併帶入。";
   }
 
   if (stageGate.status === "human-decision") {
@@ -6190,7 +6264,7 @@ function formatRecoveryNextStep(stageGate: StageGateResult) {
   }
 
   if (stageGate.needsClarification) {
-    return "補充後重跑";
+    return "重跑 Agent";
   }
 
   if (
@@ -6209,7 +6283,7 @@ function formatRecoveryNextStep(stageGate: StageGateResult) {
   }
 
   if (stageGate.canManualRetry) {
-    return "重跑同一 Agent";
+    return "重跑 Agent";
   }
 
   if (stageGate.status === "human-decision") {
