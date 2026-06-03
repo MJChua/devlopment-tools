@@ -291,6 +291,12 @@ html[data-accent="violet"] {
     background-color: var(--card);
   }
 
+  .dark .bg-white\/70,
+  .dark .bg-white\/75,
+  .dark .bg-white\/95 {
+    background-color: color-mix(in oklch, var(--card) 92%, transparent);
+  }
+
   .dark .bg-slate-50,
   .dark .bg-slate-100 {
     background-color: color-mix(in oklch, var(--card) 88%, var(--foreground) 12%);
@@ -320,6 +326,10 @@ html[data-accent="violet"] {
     border-color: var(--border);
   }
 
+  .dark .border-slate-900 {
+    border-color: var(--border);
+  }
+
   .dark .text-slate-950,
   .dark .text-slate-900,
   .dark .text-slate-800,
@@ -333,23 +343,42 @@ html[data-accent="violet"] {
     color: var(--muted-foreground);
   }
 
+  .dark .text-blue-600,
   .dark .text-blue-700,
   .dark .text-blue-800,
   .dark .text-blue-900,
   .dark .text-blue-950,
   .dark .text-green-700,
-  .dark .text-green-800 {
+  .dark .text-green-800,
+  .dark .text-green-900 {
     color: var(--primary);
   }
 
   .dark .text-red-700,
   .dark .text-red-800,
+  .dark .text-red-900,
   .dark .text-amber-600,
+  .dark .text-amber-700,
   .dark .text-amber-800,
   .dark .text-amber-900,
+  .dark .text-amber-950,
   .dark .text-orange-600,
+  .dark .text-orange-700,
   .dark .text-orange-800,
   .dark .text-orange-900 {
     color: color-mix(in oklch, var(--destructive) 75%, var(--foreground));
+  }
+
+  .dark input,
+  .dark textarea,
+  .dark select {
+    background-color: var(--card);
+    border-color: var(--border);
+    color: var(--foreground);
+  }
+
+  .dark input::placeholder,
+  .dark textarea::placeholder {
+    color: var(--muted-foreground);
   }
 }

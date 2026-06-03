@@ -7,6 +7,7 @@ const {
   analyzeNaturalLanguageRequest,
   extractWorkerInterpretationFromText,
   inferTitle,
+  normalizeRequestInterpretation,
 } = await import("../src/lib/request-analysis.ts");
 
 test("request analysis lets low-risk bug reports use user evidence and repo inspection", () => {
@@ -85,4 +86,12 @@ test("title inference keeps natural language short and readable", () => {
     inferTitle("  # 新增會員篩選條件，並保留現有查詢條件\n更多內容"),
     "新增會員篩選條件，並保留現有查詢條件",
   );
+});
+
+test("request analysis uses Chinese fallback copy for empty draft records", () => {
+  const analysis = normalizeRequestInterpretation({});
+
+  assert.equal(inferTitle("   \n"), "新需求");
+  assert.equal(analysis.title, "新需求");
+  assert.equal(analysis.summary, "需求正在等待 Local Worker/Codex 判讀。");
 });

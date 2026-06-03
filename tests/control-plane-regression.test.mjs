@@ -131,6 +131,100 @@ test("local worker pushes formal PR branches without merging develop locally", (
   assert.equal((source.match(/git push/g) ?? []).length, 1);
 });
 
+test("workflow request records are scoped to the selected repository", () => {
+  const source = readFileSync(
+    new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /isRequestForSelectedRepository\(request, selectedRepoPath\)/);
+  assert.match(source, /normalizeRepositoryPath\(request\.repoPath\) === normalizedSelectedRepo/);
+  assert.match(source, /!selectedExists \|\| selectedVisible/);
+  assert.match(source, /const hiddenRequestId = selectedRequestId/);
+  assert.match(source, /window\.setTimeout/);
+  assert.match(source, /selectedRequestIdRef\.current !== hiddenRequestId/);
+  assert.match(source, /setSelectedRequestId\(""\)/);
+  assert.match(source, /setDetail\(null\)/);
+  assert.match(source, /setStageGate\(null\)/);
+});
+
+test("request record titles hide legacy English placeholders", () => {
+  const source = readFileSync(
+    new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),
+    "utf8",
+  );
+  const workflowSource = readFileSync(
+    new URL("../src/lib/control-plane-workflow.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /formatRequestDisplayTitle\(request\)/);
+  assert.match(source, /formatRequestDisplayTitle\(selectedRequest\)/);
+  assert.match(source, /request \? formatRequestDisplayTitle\(request\) : ""/);
+  assert.match(source, /isEnglishPlaceholderTitle/);
+  assert.match(source, /未命名需求/);
+  assert.match(source, /formatInterpretationSummary\(interpretation\.summary\)/);
+  assert.match(source, /isEnglishPlaceholderSummary/);
+  assert.match(source, /需求摘要待本機 Codex 重新判讀/);
+  assert.doesNotMatch(workflowSource, /short human-readable title/);
+  assert.match(workflowSource, /中文可讀標題/);
+  assert.match(workflowSource, /中文分類摘要；不要宣稱來源已確認/);
+});
+
+test("blocker recovery exposes one rerun Agent action", () => {
+  const source = readFileSync(
+    new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),
+    "utf8",
+  );
+  const blockerSource = readFileSync(
+    new URL("../src/lib/blocker-summary.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /async function rerunAgent/);
+  assert.match(source, /hasRecoveryInput \? "clarify_and_retry" : "retry_same_agent"/);
+  assert.match(source, /onRerunAgent=\{rerunAgent\}/);
+  assert.match(source, /const canRerunAgent = canManualRetry \|\| canClarifyAndRetry/);
+  assert.match(source, /重跑 Agent/);
+  assert.doesNotMatch(source, /重跑同一 Agent/);
+  assert.doesNotMatch(source, /補充後重跑 Agent/);
+  assert.doesNotMatch(blockerSource, /重跑同一 Agent/);
+});
+
+test("workflow dark mode keeps legacy utility colors readable", () => {
+  const source = readFileSync(
+    new URL("../src/app/globals.css", import.meta.url),
+    "utf8",
+  );
+
+  assert(source.includes(".dark .bg-white\\/75"));
+  assert(source.includes(".dark .text-blue-600"));
+  assert(source.includes(".dark .text-green-900"));
+  assert(source.includes(".dark .text-amber-950"));
+  assert(source.includes(".dark input"));
+  assert(source.includes(".dark textarea"));
+  assert(source.includes(".dark input::placeholder"));
+});
+
+test("hotfix planning remains documented as pending release policy", () => {
+  const operatorGuide = readFileSync(
+    new URL("../docs/operator-guide.md", import.meta.url),
+    "utf8",
+  );
+  const futureNotes = readFileSync(
+    new URL("../docs/future-phase-notes.md", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(operatorGuide, /Hotfix planning status/);
+  assert.match(operatorGuide, /Formal PR delivery still uses `develop`/);
+  assert.match(operatorGuide, /does not decide production release routing/);
+  assert.match(operatorGuide, /must not create release branches, deploy, update branch policy/);
+  assert.match(futureNotes, /Hotfix Release Target Policy/);
+  assert.match(futureNotes, /pending product decision/);
+  assert.match(futureNotes, /must not infer production release routing/);
+});
+
 test("request-scoped PR create route refreshes existing Azure PR before creating one", () => {
   const routeSource = readFileSync(
     new URL("../src/app/api/requests/[requestId]/pr-create/route.ts", import.meta.url),

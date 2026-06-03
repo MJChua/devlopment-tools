@@ -350,13 +350,13 @@ export function inferTitle(detail: string) {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .find(Boolean);
-  const title = (firstLine || "New request")
+  const title = (firstLine || "新需求")
     .replace(/\s+/g, " ")
     .replace(/^[-*#\d.\s]+/, "")
     .slice(0, 64)
     .trim();
 
-  return title || "New request";
+  return title || "新需求";
 }
 
 function inferKind(lower: string): RequestKind {
@@ -546,10 +546,10 @@ function sanitizeText(value: unknown) {
 function defaultInterpretation(): RequestInterpretation {
   return {
     source: "provisional",
-    title: "New request",
+    title: "新需求",
     kind: "REQ",
     taskLevel: "Level 2",
-    summary: "Request is waiting for Local Worker/Codex interpretation.",
+    summary: "需求正在等待 Local Worker/Codex 判讀。",
     suggestedNextAgent: "agent0",
     missingSources: ["Target surface and expected behavior"],
     sourceWarnings: [

@@ -90,10 +90,10 @@ Agent0 / Codex should include the following block in its output so the App can u
 ```text
 CONTROL_PLANE_INTERPRETATION_START
 {
-  "title": "short human-readable title",
+  "title": "中文可讀標題",
   "kind": "REQ | BUG | REF | DOC | OPS",
   "taskLevel": "Level 0 | Level 1 | Level 2 | Level 3",
-  "summary": "classification summary; do not claim sources are confirmed",
+  "summary": "中文分類摘要；不要宣稱來源已確認",
   "suggestedNextAgent": "agent1",
   "missingSources": ["Spec / business rule confirmation"],
   "sourceWarnings": ["User text is intake evidence only"],
@@ -238,6 +238,13 @@ Formal PR delivery branch policy:
 - Branch names use only the kind and Work Item number. Do not add title, slug, date, or other suffixes.
 - The Local Worker never merges or rebases `origin/develop` into the request branch. If the branch is behind `origin/develop`, the workflow blocks until a human updates the branch in Azure Repos or Git.
 - A later adjustment must be created as a new request. If it uses the same Azure Work Item, it updates the same source branch and the same active Azure PR.
+
+Hotfix planning status:
+
+- The MVP can classify `HOTFIX` requests and derive `hotfix/{workItemId}` only after reading a verified Azure Work Item.
+- Formal PR delivery still uses `develop` as the base branch for request branch preparation, Azure PR creation/refresh, and PR discovery.
+- This does not decide production release routing. Release branch targets, deployment checks, approvals, rollback steps, and release audit records remain pending product decisions.
+- Until those decisions are finalized, Codex and the Local Worker must not create release branches, deploy, update branch policy, or treat a hotfix as bypassing the normal PR delivery gates.
 
 Allowed MVP writes:
 
