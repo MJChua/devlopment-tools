@@ -164,6 +164,43 @@ test("local launcher supervises saved workers and reports stale pids", () => {
   assert.match(utilsSource, /pid_not_running/);
 });
 
+test("local worker retries completion reports when the App is unreachable", () => {
+  const source = readFileSync(
+    new URL("../scripts/local-worker.mjs", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /completionRetryDelaysMs/);
+  assert.match(source, /async function postRunCompletion/);
+  assert.match(source, /completion report failed/);
+  assert.match(source, /retrying in/);
+  assert.match(source, /postRunCompletion\(run\.runId/);
+});
+
+test("local worker supports run-level cancellation without stopping the worker", () => {
+  const workerSource = readFileSync(
+    new URL("../scripts/local-worker.mjs", import.meta.url),
+    "utf8",
+  );
+  const uiSource = readFileSync(
+    new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),
+    "utf8",
+  );
+  const dbSource = readFileSync(
+    new URL("../src/lib/control-plane-db.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(workerSource, /runCancelCheckIntervalMs/);
+  assert.match(workerSource, /cancelRequestedAt/);
+  assert.match(workerSource, /taskkill\.exe/);
+  assert.match(workerSource, /status: "cancelled"/);
+  assert.match(dbSource, /export function cancelWorkerRun/);
+  assert.match(dbSource, /agent\.cancelled/);
+  assert.match(uiSource, /停止 Agent/);
+  assert.match(uiSource, /runs\/\$\{openRun\.runId\}\/cancel/);
+});
+
 test("workflow UI keeps launcher recovery guidance concise", () => {
   const source = readFileSync(
     new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),
@@ -172,10 +209,29 @@ test("workflow UI keeps launcher recovery guidance concise", () => {
 
   assert.match(source, /Launcher 需要更新/);
   assert.match(source, /Launcher 暫時模式/);
-  assert.match(source, /複製正式安裝指令/);
+  assert.match(source, /複製管理員安裝指令/);
+  assert.match(source, /launcherState\.requiresAdminInstall\s*&&\s*!launcherVersionMismatch/);
+  assert.match(source, /Launcher 已是目前版本，但正式常駐安裝尚未完成/);
+  assert.match(source, /以系統管理員身分開啟的 PowerShell/);
+  assert.match(source, /installMode=scheduled-task/);
+  assert.match(source, /requiresAdminInstall=false/);
+  assert.match(source, /scheduledTaskStatus=installed/);
+  assert.match(source, /Startup folder fallback/);
+  assert.match(source, /launcherState\.installMode === "temporary-startup-folder"/);
+  assert.match(source, /Scheduled Task 狀態/);
+  assert.match(source, /Scheduled Task 錯誤/);
   assert.match(source, /inferWorkerStatusReason/);
   assert.match(source, /pid_not_running/);
   assert.match(source, /查看詳情/);
+  assert.match(source, /Agent run 已停滯，不是仍在正常執行/);
+  assert.match(source, /Run 更新/);
+  assert.match(source, /進度更新/);
+  assert.match(source, /command output、artifact 或 error/);
+  assert.match(source, /這不代表多個 codex\.exe 都在跑同一個 Agent/);
+  assert.match(source, /codex\.exe app-server \/ Desktop 子程序/);
+  assert.match(source, /Agent 任務子程序會是 codex exec/);
+  assert.match(source, /沒有明確 exec activity，只能判定 run 回報停滯/);
+  assert.match(source, /同步後重跑 Agent/);
   assert.doesNotMatch(source, /Launcher 目前是暫時啟動模式/);
   assert.doesNotMatch(source, /目前 worker 可以使用，但 Scheduled Task 尚未正式安裝/);
   assert.doesNotMatch(source, /重開機或重新登入後穩定性取決於 Startup/);

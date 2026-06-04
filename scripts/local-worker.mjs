@@ -33,6 +33,8 @@ const launcherVersion = process.env.CONTROL_PLANE_LAUNCHER_VERSION || "";
 const workerUpdatedAt = process.env.CONTROL_PLANE_WORKER_UPDATED_AT || "";
 const intervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS || 5000);
 const pollRetryDelaysMs = [5000, 10000, 30000];
+const completionRetryDelaysMs = [5000, 10000, 30000];
+const runCancelCheckIntervalMs = 5000;
 const once = process.argv.includes("--once");
 const setupOnly = process.argv.includes("--setup-only");
 const skippedRepositoryScanDirs = new Set([
@@ -138,6 +140,42 @@ async function executeRun(run) {
     progress.detail = detail || label;
     progress.updatedAt = new Date().toISOString();
   };
+  let cancelRequested = Boolean(run.cancelRequestedAt);
+  const applyRunState = (response) => {
+    const serverRun = response?.run ?? response;
+    if (
+      serverRun?.cancelRequestedAt ||
+      serverRun?.status === "cancelled"
+    ) {
+      cancelRequested = true;
+      setProgress(
+        "Stopping Agent",
+        "Stop requested; terminating the current Agent process.",
+      );
+    }
+    return serverRun;
+  };
+  const postRunHeartbeat = async () => {
+    const response = await postJson(
+      `/api/workers/runs/${run.runId}/heartbeat`,
+      heartbeatBody(),
+    );
+    applyRunState(response);
+    return response;
+  };
+  const shouldCancelRun = async () => {
+    if (cancelRequested) {
+      return true;
+    }
+    try {
+      await postRunHeartbeat();
+    } catch (error) {
+      console.warn(
+        `[worker:${workerId}] cancel check heartbeat failed for ${run.runId}: ${formatError(error)}`,
+      );
+    }
+    return cancelRequested;
+  };
 
   try {
     if (!runRepoPath) {
@@ -145,12 +183,9 @@ async function executeRun(run) {
     }
 
     await writeFile(packetFile, run.packet, "utf8");
-    await postJson(`/api/workers/runs/${run.runId}/heartbeat`, heartbeatBody());
+    await postRunHeartbeat();
     runHeartbeatTimer = setInterval(() => {
-      void postJson(
-        `/api/workers/runs/${run.runId}/heartbeat`,
-        heartbeatBody(),
-      ).catch((error) => {
+      void postRunHeartbeat().catch((error) => {
         console.warn(
           `[worker:${workerId}] run heartbeat failed for ${run.runId}: ${formatError(error)}`,
         );
@@ -168,7 +203,7 @@ async function executeRun(run) {
     });
     runRepoPath = preparedRepo.repoPath;
     progress.executionRepoPath = runRepoPath;
-    await postJson(`/api/workers/runs/${run.runId}/heartbeat`, heartbeatBody());
+    await postRunHeartbeat();
 
     const command = renderCommand(commandTemplate, {
       packetFile,
@@ -177,7 +212,7 @@ async function executeRun(run) {
       repoPath: runRepoPath,
     });
     setProgress("Running Codex", `${run.agentRole} is executing in ${runRepoPath}.`);
-    await postJson(`/api/workers/runs/${run.runId}/heartbeat`, heartbeatBody());
+    await postRunHeartbeat();
     const result = await runCommand(
       command,
       runRepoPath,
@@ -191,17 +226,29 @@ async function executeRun(run) {
           setProgress(inferred.label, inferred.detail);
         }
       },
+      shouldCancelRun,
     );
+    if (result.cancelled) {
+      await postRunCompletion(run.runId, {
+        status: "cancelled",
+        commandOutput: result.output,
+        error: "user_cancelled: Agent run was stopped by user request.",
+        artifact: "",
+        diffSummary: await collectDiffSummary(runRepoPath).catch(() => ""),
+      });
+      console.log(`[worker:${workerId}] cancelled ${run.runId}`);
+      return;
+    }
     const deliverySummary =
       result.exitCode === 0
         ? await finalizeTeamPrDelivery(run, runRepoPath, { setProgress })
         : "";
     setProgress("Collecting diff summary", "Codex finished; collecting git diff.");
-    await postJson(`/api/workers/runs/${run.runId}/heartbeat`, heartbeatBody());
+    await postRunHeartbeat();
     const diffSummary = await collectDiffSummary(runRepoPath);
     const artifact = buildArtifact(run, result, diffSummary, deliverySummary);
 
-    await postJson(`/api/workers/runs/${run.runId}/complete`, {
+    await postRunCompletion(run.runId, {
       status: result.exitCode === 0 ? "completed" : "failed",
       commandOutput: result.output,
       diffSummary,
@@ -212,7 +259,7 @@ async function executeRun(run) {
     console.log(`[worker:${workerId}] completed ${run.runId}`);
   } catch (error) {
     const blockedError = formatBlockedWorkerError(error);
-    await postJson(`/api/workers/runs/${run.runId}/complete`, {
+    await postRunCompletion(run.runId, {
       status: "blocked",
       error: blockedError,
       artifact: `# Worker Blocked\n\n${blockedError}`,
@@ -268,6 +315,25 @@ async function postJson(pathname, body) {
   }
 
   return response.json();
+}
+
+async function postRunCompletion(runId, body) {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await postJson(`/api/workers/runs/${runId}/complete`, body);
+    } catch (error) {
+      const retryDelayMs =
+        completionRetryDelaysMs[
+          Math.min(attempt, completionRetryDelaysMs.length - 1)
+        ];
+      attempt += 1;
+      console.warn(
+        `[worker:${workerId}] completion report failed for ${runId} (${formatError(error)}); retrying in ${Math.round(retryDelayMs / 1000)}s.`,
+      );
+      await delay(retryDelayMs);
+    }
+  }
 }
 
 async function reportRepositoryCandidates() {
@@ -879,7 +945,14 @@ function clipProgressText(value) {
   return value.replace(/\s+/g, " ").trim().slice(0, 240);
 }
 
-function runCommand(command, cwd, extraEnv = {}, timeoutMs = 0, onOutput = null) {
+function runCommand(
+  command,
+  cwd,
+  extraEnv = {},
+  timeoutMs = 0,
+  onOutput = null,
+  shouldCancel = null,
+) {
   return new Promise((resolve) => {
     const child = spawn(command, {
       cwd,
@@ -892,6 +965,7 @@ function runCommand(command, cwd, extraEnv = {}, timeoutMs = 0, onOutput = null)
     });
     const chunks = [];
     let settled = false;
+    let checkingCancel = false;
     const timer =
       timeoutMs > 0
         ? setTimeout(() => {
@@ -900,7 +974,10 @@ function runCommand(command, cwd, extraEnv = {}, timeoutMs = 0, onOutput = null)
             }
 
             settled = true;
-            child.kill();
+            if (cancelTimer) {
+              clearInterval(cancelTimer);
+            }
+            void terminateChildProcessTree(child);
             const decodedOutput = decodeCommandBuffer(Buffer.concat(chunks));
             resolve({
               exitCode: 124,
@@ -908,6 +985,43 @@ function runCommand(command, cwd, extraEnv = {}, timeoutMs = 0, onOutput = null)
             });
           }, timeoutMs)
         : null;
+    const cancelTimer = shouldCancel
+      ? setInterval(() => {
+          if (settled || checkingCancel) {
+            return;
+          }
+          checkingCancel = true;
+          Promise.resolve()
+            .then(() => shouldCancel())
+            .then((cancel) => {
+              if (!cancel || settled) {
+                return;
+              }
+
+              settled = true;
+              if (timer) {
+                clearTimeout(timer);
+              }
+              clearInterval(cancelTimer);
+              void terminateChildProcessTree(child);
+              const decodedOutput = decodeCommandBuffer(Buffer.concat(chunks));
+              resolve({
+                exitCode: 130,
+                output:
+                  `${decodedOutput}\nAgent run stopped by user request.`.trim(),
+                cancelled: true,
+              });
+            })
+            .catch((error) => {
+              console.warn(
+                `[worker:${workerId}] cancel check failed: ${formatError(error)}`,
+              );
+            })
+            .finally(() => {
+              checkingCancel = false;
+            });
+        }, runCancelCheckIntervalMs)
+      : null;
 
     child.stdout.on("data", (chunk) => {
       const buffer = Buffer.from(chunk);
@@ -932,10 +1046,43 @@ function runCommand(command, cwd, extraEnv = {}, timeoutMs = 0, onOutput = null)
       if (timer) {
         clearTimeout(timer);
       }
+      if (cancelTimer) {
+        clearInterval(cancelTimer);
+      }
       resolve({
         exitCode: exitCode ?? 1,
         output: decodeCommandBuffer(Buffer.concat(chunks)).slice(-20000),
       });
+    });
+  });
+}
+
+function terminateChildProcessTree(child) {
+  if (!child.pid) {
+    child.kill();
+    return Promise.resolve();
+  }
+
+  if (process.platform !== "win32") {
+    child.kill("SIGTERM");
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const killer = spawn(
+      "taskkill.exe",
+      ["/PID", String(child.pid), "/T", "/F"],
+      {
+        windowsHide: true,
+        stdio: "ignore",
+      },
+    );
+    killer.on("error", () => {
+      child.kill();
+      resolve();
+    });
+    killer.on("close", () => {
+      resolve();
     });
   });
 }

@@ -19,6 +19,7 @@ import {
   isHandoffSchemaRun,
   isEmptyResumeSnapshot,
   isOpenWorkerRun,
+  isRunHeartbeatStale,
   mergeStructuredAgentReport,
   normalizeAzureReferenceEvidence,
   normalizePrDeliveryTrace,
@@ -75,6 +76,12 @@ export type CompleteWorkerRunInput = {
   artifact?: string;
   error?: string;
   interpretation?: Partial<RequestInterpretation>;
+};
+
+export type CancelWorkerRunInput = {
+  requestId: string;
+  runId: string;
+  actor?: string;
 };
 
 export type WorkerRunHeartbeatInput = {
@@ -849,18 +856,25 @@ export function recoverWorkflowRequest(input: RecoverWorkflowRequestInput) {
     });
   }
 
-  if (detail.runs.some(isOpenWorkerRun)) {
-    throw new Error(
-      "Cannot start recovery while an Agent run is queued or running.",
-    );
-  }
-
   const stageGate = evaluateWorkflowStageGate(detail);
   const fallbackRun = getEffectiveBlockingRun(detail.runs);
   const runId = input.runId?.trim() || stageGate.blockedRunId || fallbackRun?.runId || "";
   const blockedRun = runId
     ? detail.runs.find((run) => run.runId === runId)
     : null;
+  const recoveringStaleOpenRun = Boolean(
+    blockedRun &&
+      stageGate.recoveryKind === "stale_run" &&
+      stageGate.blockedRunId === blockedRun.runId &&
+      blockedRun.status === "running" &&
+      isRunHeartbeatStale(blockedRun),
+  );
+
+  if (detail.runs.some(isOpenWorkerRun) && !recoveringStaleOpenRun) {
+    throw new Error(
+      "Cannot start recovery while an Agent run is queued or running.",
+    );
+  }
 
   if (!blockedRun) {
     throw new Error("No blocked Agent run is available for recovery.");
@@ -873,9 +887,11 @@ export function recoverWorkflowRequest(input: RecoverWorkflowRequestInput) {
   if (
     blockedRun.status !== "failed" &&
     blockedRun.status !== "blocked" &&
+    blockedRun.status !== "cancelled" &&
+    !recoveringStaleOpenRun &&
     !canRetryCompletedInterpretation
   ) {
-    throw new Error("Only blocked or failed Agent runs can be recovered.");
+    throw new Error("Only blocked, failed, or cancelled Agent runs can be recovered.");
   }
 
   let dispatchReason: WorkerRunDispatchReason = "manual_retry";
@@ -902,6 +918,10 @@ export function recoverWorkflowRequest(input: RecoverWorkflowRequestInput) {
       );
     }
     dispatchReason = "clarification_retry";
+  }
+
+  if (recoveringStaleOpenRun) {
+    markStaleWorkerRunBlocked(blockedRun, input.actor);
   }
 
   const run = dispatchNextAgent({
@@ -940,6 +960,174 @@ export function recoverWorkflowRequest(input: RecoverWorkflowRequestInput) {
   );
 
   return run;
+}
+
+export function cancelWorkerRun(input: CancelWorkerRunInput) {
+  const detail = getRequestDetail(input.requestId);
+  if (!detail) {
+    throw new Error("Request not found.");
+  }
+
+  const run = detail.runs.find((candidate) => candidate.runId === input.runId);
+  if (!run) {
+    throw new Error("Run not found for this request.");
+  }
+
+  const openRun = [...detail.runs].reverse().find(isOpenWorkerRun);
+  if (!openRun || openRun.runId !== run.runId) {
+    throw new Error("Only the current open Agent run can be stopped.");
+  }
+
+  if (run.status === "queued") {
+    return markWorkerRunCancelled(
+      run,
+      input.actor,
+      "Agent run was stopped before the Local Worker picked it up.",
+    );
+  }
+
+  if (run.status !== "running") {
+    throw new Error("Only queued or running Agent runs can be stopped.");
+  }
+
+  if (isRunHeartbeatStale(run)) {
+    return markWorkerRunCancelled(
+      run,
+      input.actor,
+      "Stale Agent run was stopped by user request.",
+    );
+  }
+
+  const now = new Date().toISOString();
+  getDatabase()
+    .prepare(
+      `UPDATE worker_runs
+       SET cancel_requested_at = COALESCE(cancel_requested_at, ?),
+           cancel_requested_by = CASE
+             WHEN cancel_requested_by = '' THEN ?
+             ELSE cancel_requested_by
+           END,
+           progress_label = 'Stopping Agent',
+           progress_detail = ?,
+           progress_updated_at = ?,
+           updated_at = ?
+       WHERE run_id = ? AND status = 'running'`,
+    )
+    .run(
+      now,
+      input.actor ?? "control-plane",
+      "Stop requested; waiting for the Local Worker to terminate the Agent process.",
+      now,
+      now,
+      run.runId,
+    );
+
+  appendAuditEvent(
+    run.requestId,
+    "agent.cancel_requested",
+    `${run.agentRole} stop requested.`,
+    {
+      actor: input.actor ?? "control-plane",
+      metadata: { runId: run.runId },
+    },
+  );
+
+  return requireRun(run.runId);
+}
+
+function markWorkerRunCancelled(
+  run: WorkerRun,
+  actor?: string,
+  detail = "Agent run was stopped by user request.",
+) {
+  const now = new Date().toISOString();
+  const error = "user_cancelled: Agent run was stopped by user request.";
+  const artifact = run.artifact.trim()
+    ? run.artifact
+    : `# Agent Run Stopped\n\n${detail}`;
+
+  getDatabase()
+    .prepare(
+      `UPDATE worker_runs
+       SET status = 'cancelled',
+           artifact = ?,
+           error = ?,
+           progress_label = 'Agent stopped',
+           progress_detail = ?,
+           progress_updated_at = ?,
+           cancel_requested_at = COALESCE(cancel_requested_at, ?),
+           cancel_requested_by = CASE
+             WHEN cancel_requested_by = '' THEN ?
+             ELSE cancel_requested_by
+           END,
+           completed_at = ?,
+           updated_at = ?
+       WHERE run_id = ? AND status IN ('queued', 'running')`,
+    )
+    .run(
+      artifact,
+      error,
+      detail,
+      now,
+      now,
+      actor ?? "control-plane",
+      now,
+      now,
+      run.runId,
+    );
+
+  updateRequestStage(run.requestId, "blocked");
+  appendAuditEvent(
+    run.requestId,
+    "agent.cancelled",
+    `${run.agentRole} stopped by user request.`,
+    {
+      actor: actor ?? "control-plane",
+      metadata: { runId: run.runId },
+    },
+  );
+
+  return requireRun(run.runId);
+}
+
+function markStaleWorkerRunBlocked(run: WorkerRun, actor?: string) {
+  const now = new Date().toISOString();
+  const error =
+    "stale_run: Agent run was marked running, but its progress heartbeat became stale before completion.";
+  const artifact = run.artifact.trim()
+    ? run.artifact
+    : `# Worker Run Stalled\n\n${error}`;
+
+  getDatabase()
+    .prepare(
+      `UPDATE worker_runs
+       SET status = 'blocked',
+           artifact = ?,
+           error = ?,
+           progress_label = 'Agent run stalled',
+           progress_detail = ?,
+           completed_at = ?,
+           updated_at = ?
+       WHERE run_id = ? AND status = 'running'`,
+    )
+    .run(
+      artifact,
+      error,
+      "The stale running run was closed before dispatching a recovery retry.",
+      now,
+      now,
+      run.runId,
+    );
+
+  appendAuditEvent(
+    run.requestId,
+    "agent.stale_run_blocked",
+    `${run.agentRole} stale running run was marked blocked before recovery retry.`,
+    {
+      actor: actor ?? "control-plane",
+      metadata: { runId: run.runId },
+    },
+  );
 }
 
 function reconcileWorkerRunOutput(input: {
@@ -1350,6 +1538,11 @@ export function heartbeatWorkerRun(
     throw new Error("Run is not assigned to this worker.");
   }
 
+  if (run.status === "cancelled") {
+    markWorkerSeen(workerId);
+    return run;
+  }
+
   const now = new Date().toISOString();
   const progressLabel = normalizeProgressText(input.progressLabel, 100);
   const progressDetail = normalizeProgressText(input.progressDetail, 500);
@@ -1429,6 +1622,10 @@ export function completeWorkerRun(
 
   const now = new Date().toISOString();
   const requestedStatus = normalizeCompleteStatus(input.status);
+  if (run.status === "cancelled" && requestedStatus !== "cancelled") {
+    markWorkerSeen(workerId);
+    return run;
+  }
   const rawArtifact = input.artifact?.trim() || run.artifact;
   const commandOutput = input.commandOutput?.trim() ?? run.commandOutput;
   const artifact =
@@ -1475,7 +1672,11 @@ export function completeWorkerRun(
       input.diffSummary?.trim() ?? run.diffSummary,
       artifact,
       error,
-      status === "completed" ? "Agent completed" : "Agent blocked",
+      status === "cancelled"
+        ? "Agent stopped by user request"
+        : status === "completed"
+          ? "Agent completed"
+          : "Agent blocked",
       error || `${run.agentRole} returned ${status}.`,
       now,
       now,
@@ -2086,6 +2287,8 @@ function getDatabase() {
       progress_label TEXT NOT NULL DEFAULT '',
       progress_detail TEXT NOT NULL DEFAULT '',
       progress_updated_at TEXT,
+      cancel_requested_at TEXT,
+      cancel_requested_by TEXT NOT NULL DEFAULT '',
       packet_size_chars INTEGER NOT NULL DEFAULT 0,
       prior_handoff_count INTEGER NOT NULL DEFAULT 0,
       used_resume_snapshot INTEGER NOT NULL DEFAULT 0,
@@ -2248,6 +2451,8 @@ function getDatabase() {
   ensureColumn(database, "worker_runs", "progress_label", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, "worker_runs", "progress_detail", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, "worker_runs", "progress_updated_at", "TEXT");
+  ensureColumn(database, "worker_runs", "cancel_requested_at", "TEXT");
+  ensureColumn(database, "worker_runs", "cancel_requested_by", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, "worker_runs", "packet_size_chars", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(database, "worker_runs", "prior_handoff_count", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(database, "worker_runs", "used_resume_snapshot", "INTEGER NOT NULL DEFAULT 0");
@@ -2642,6 +2847,10 @@ function mapRunRow(row: unknown): WorkerRun {
     progressUpdatedAt: value.progress_updated_at
       ? String(value.progress_updated_at)
       : null,
+    cancelRequestedAt: value.cancel_requested_at
+      ? String(value.cancel_requested_at)
+      : null,
+    cancelRequestedBy: String(value.cancel_requested_by ?? ""),
     packetSizeChars: Number(value.packet_size_chars ?? 0),
     priorHandoffCount: Number(value.prior_handoff_count ?? 0),
     usedResumeSnapshot: Number(value.used_resume_snapshot ?? 0) === 1,
@@ -2715,11 +2924,18 @@ function normalizeDispatchReason(value: unknown): WorkerRunDispatchReason {
 function normalizeCompleteStatus(
   status: WorkerRunStatus,
 ): Exclude<WorkerRunStatus, "queued" | "running"> {
-  if (status === "completed" || status === "failed" || status === "blocked") {
+  if (
+    status === "completed" ||
+    status === "failed" ||
+    status === "blocked" ||
+    status === "cancelled"
+  ) {
     return status;
   }
 
-  throw new Error("Worker run completion status must be completed, failed, or blocked.");
+  throw new Error(
+    "Worker run completion status must be completed, failed, blocked, or cancelled.",
+  );
 }
 
 function getWorkerInterpretationFromCompletion(

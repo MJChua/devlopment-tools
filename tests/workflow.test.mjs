@@ -720,9 +720,12 @@ test("workflow stage gate marks stale running run without enabling duplicate dis
   });
 
   assert.equal(stageGate.status, "waiting");
+  assert.equal(stageGate.label, "Agent run is stalled");
   assert.equal(stageGate.recoveryKind, "stale_run");
   assert.equal(stageGate.blockedRunId, staleRun.runId);
   assert.equal(stageGate.canManualRetry, false);
+  assert.match(stageGate.summary, /progress heartbeat is stale/);
+  assert.match(stageGate.nextActions[0], /rerun this same Agent/);
 });
 
 test("workflow stage gate separates queued worker pickup delay from running stale runs", () => {

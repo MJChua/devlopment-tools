@@ -40,6 +40,7 @@ export const WORKER_RUN_STATUSES = [
   "completed",
   "failed",
   "blocked",
+  "cancelled",
 ] as const;
 export const WORKER_RUN_DISPATCH_REASONS = [
   "normal",
@@ -269,6 +270,8 @@ export type WorkerRun = {
   progressLabel: string;
   progressDetail: string;
   progressUpdatedAt: string | null;
+  cancelRequestedAt: string | null;
+  cancelRequestedBy: string;
   packetSizeChars: number;
   priorHandoffCount: number;
   usedResumeSnapshot: boolean;
@@ -1969,10 +1972,10 @@ export function isPrBranchOutdatedRun(run: Pick<WorkerRun, "error" | "artifact">
 }
 
 export function isRunHeartbeatStale(
-  run: Pick<WorkerRun, "updatedAt">,
+  run: Pick<WorkerRun, "updatedAt" | "progressUpdatedAt">,
   now = Date.now(),
 ) {
-  const updatedAt = Date.parse(run.updatedAt);
+  const updatedAt = Date.parse(run.progressUpdatedAt || run.updatedAt);
   return (
     Number.isFinite(updatedAt) && now - updatedAt > RUN_HEARTBEAT_STALE_MS
   );
@@ -2001,7 +2004,9 @@ export function getEffectiveBlockingRun(runs: WorkerRun[]) {
     .reverse()
     .find(
       (run) =>
-        (run.status === "failed" || run.status === "blocked") &&
+        (run.status === "failed" ||
+          run.status === "blocked" ||
+          run.status === "cancelled") &&
         !supersededRunIds.has(run.runId),
     );
 }
@@ -2039,7 +2044,9 @@ export function evaluateWorkflowStageGate(
       );
     } else {
       blockers.push(
-        `${formatAgentRole(failedRun.agentRole)} reported ${failedRun.status}: ${failedRun.error || "no error detail returned"}`,
+        failedRun.status === "cancelled"
+          ? `${formatAgentRole(failedRun.agentRole)} was stopped by user request.`
+          : `${formatAgentRole(failedRun.agentRole)} reported ${failedRun.status}: ${failedRun.error || "no error detail returned"}`,
       );
     }
   }
@@ -2053,21 +2060,21 @@ export function evaluateWorkflowStageGate(
       label: pickupStale
         ? "Worker has not picked up the run"
         : heartbeatStale
-          ? "Run may be stuck"
+          ? "Agent run is stalled"
           : openRun.status === "queued"
             ? "Waiting for worker pickup"
             : "Worker running",
       summary: pickupStale
         ? `${formatAgentRole(openRun.agentRole)} is still queued and has not been picked up by the Local Worker.`
         : heartbeatStale
-          ? `${formatAgentRole(openRun.agentRole)} is running, but its run heartbeat is stale.`
+          ? `${formatAgentRole(openRun.agentRole)} is marked running, but its progress heartbeat is stale and no completion has been recorded.`
           : `${formatAgentRole(openRun.agentRole)} is ${openRun.status}.`,
       blockers,
       nextActions: [
         pickupStale
           ? "Restart or refresh the assigned Local Worker so it can pick up the queued Agent run."
           : heartbeatStale
-            ? "Synchronize worker status before retrying this Agent."
+            ? "Synchronize status, then rerun this same Agent if no fresh progress or output appears."
             : openRun.status === "queued"
               ? "Wait for the assigned Local Worker to pick up the queued Agent run."
               : "Wait for the assigned Local Worker to return artifacts.",
@@ -2179,9 +2186,13 @@ export function evaluateWorkflowStageGate(
       : false;
     const repoDirtyBlocked = failedRun ? isRepoDirtyBlockedRun(failedRun) : false;
     const prBranchOutdated = failedRun ? isPrBranchOutdatedRun(failedRun) : false;
+    const userCancelled = failedRun?.status === "cancelled";
     const clarificationPrompt = failedRun
       ? extractClarificationPromptFromArtifact(failedRun.artifact)
       : null;
+    if (userCancelled && nextActions.length === 0) {
+      nextActions.push("Rerun the same Agent if this request should continue.");
+    }
     return stageGateResult({
       status: "blocked",
       label: "Blocked",
@@ -2213,7 +2224,8 @@ export function evaluateWorkflowStageGate(
           !isHandoffSchemaRun(failedRun) &&
           !workerRuntimeError &&
           !repoDirtyBlocked &&
-          !prBranchOutdated,
+          !prBranchOutdated &&
+          !userCancelled,
       ),
       clarificationPrompt,
     });

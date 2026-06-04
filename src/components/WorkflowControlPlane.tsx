@@ -2009,6 +2009,36 @@ export function WorkflowControlPlane() {
     );
   }
 
+  async function cancelCurrentAgentRun() {
+    if (!selectedRequest || !openRun) {
+      return;
+    }
+
+    setState("loading");
+    setMessage("正在停止目前 Agent run...");
+
+    try {
+      await fetchJson<{ run: unknown }>(
+        `/api/requests/${selectedRequest.requestId}/runs/${openRun.runId}/cancel`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            actor: requestForm.owner || "control-plane",
+          }),
+        },
+      );
+      await Promise.all([
+        refreshAll(),
+        refreshSelectedRequest(selectedRequest.requestId),
+      ]);
+      setState("success");
+      setMessage("已停止目前 Agent；可重跑同一個 Agent。");
+    } catch (error) {
+      setState("error");
+      setMessage(formatError(error));
+    }
+  }
+
   function openQuickClarificationDialog() {
     setDismissedClarificationDialogKey("");
   }
@@ -3049,11 +3079,13 @@ export function WorkflowControlPlane() {
                 </div>
 
                 <WorkflowStatusDashboard
+                  loading={state === "loading"}
                   launcherState={launcherState}
                   latestRun={latestRun}
                   openRun={openRun}
                   request={selectedRequest}
                   worker={selectedWorker}
+                  onCancelRun={cancelCurrentAgentRun}
                 />
                 {stageGate ? <StageGateSummary stageGate={stageGate} /> : null}
                 {stageGate ? (
@@ -3077,6 +3109,7 @@ export function WorkflowControlPlane() {
                     }
                     onRemoveAttachment={removeRecoveryAttachment}
                     onSelectAttachmentFiles={handleRecoveryAttachmentFileChange}
+                    onCancelRun={cancelCurrentAgentRun}
                     onRerunAgent={rerunAgent}
                     onStartNewRequest={startNewRequest}
                     onSync={() =>
@@ -3471,7 +3504,11 @@ function getTimelineStepStatus(run: WorkerRunView | null) {
     return "active" as const;
   }
 
-  if (run.status === "failed" || run.status === "blocked") {
+  if (
+    run.status === "failed" ||
+    run.status === "blocked" ||
+    run.status === "cancelled"
+  ) {
     return "blocked" as const;
   }
 
@@ -3949,6 +3986,7 @@ function BlockerRecoveryPanel({
   onRefreshWorker,
   onRemoveAttachment,
   onSelectAttachmentFiles,
+  onCancelRun,
   onRerunAgent,
   onStartNewRequest,
   onSync,
@@ -3969,6 +4007,7 @@ function BlockerRecoveryPanel({
   onRefreshWorker: () => void;
   onRemoveAttachment: (attachmentId: string) => void;
   onSelectAttachmentFiles: (event: ChangeEvent<HTMLInputElement>) => void;
+  onCancelRun: () => void;
   onRerunAgent: () => void;
   onStartNewRequest: () => void;
   onSync: () => void;
@@ -3988,8 +4027,13 @@ function BlockerRecoveryPanel({
       : null) ??
     latestRun;
   const hasOpenRun = Boolean(openRun);
+  const canRecoverStaleRun =
+    stageGate.recoveryKind === "stale_run" &&
+    Boolean(stageGate.blockedRunId) &&
+    openRun?.runId === stageGate.blockedRunId;
   const canManualRetry =
-    stageGate.canManualRetry && Boolean(stageGate.blockedRunId) && !hasOpenRun;
+    Boolean(stageGate.blockedRunId) &&
+    (canRecoverStaleRun || (stageGate.canManualRetry && !hasOpenRun));
   const canClarifyAndRetry =
     stageGate.needsClarification &&
     Boolean(stageGate.blockedRunId) &&
@@ -4012,6 +4056,12 @@ function BlockerRecoveryPanel({
     : blockedRun
       ? formatUiAgentRole(blockedRun.agentRole)
       : "未判定";
+  const blockedRunMissingOutput = Boolean(
+    blockedRun &&
+      !blockedRun.commandOutput.trim() &&
+      !blockedRun.artifact.trim() &&
+      !blockedRun.error.trim(),
+  );
 
   return (
     <section
@@ -4055,6 +4105,31 @@ function BlockerRecoveryPanel({
         />
         <MiniBadge label="下一步" value={formatRecoveryNextStep(stageGate)} />
       </div>
+
+      {stageGate.recoveryKind === "stale_run" && blockedRun ? (
+        <div className="mt-3 grid gap-2 md:grid-cols-4">
+          <MiniBadge
+            label="Run 更新"
+            value={formatTimestamp(blockedRun.updatedAt)}
+          />
+          <MiniBadge
+            label="進度更新"
+            value={formatTimestamp(blockedRun.progressUpdatedAt)}
+          />
+          <MiniBadge
+            label="輸出"
+            value={blockedRun.commandOutput.trim() ? "有" : "無"}
+          />
+          <MiniBadge
+            label="Artifact/Error"
+            value={
+              blockedRun.artifact.trim() || blockedRun.error.trim()
+                ? "有"
+                : "無"
+            }
+          />
+        </div>
+      ) : null}
 
       <BlockerSummaryList items={stageGate.blockers} />
 
@@ -4152,9 +4227,24 @@ function BlockerRecoveryPanel({
       ) : null}
 
       {stageGate.recoveryKind === "stale_run" ? (
-        <p className="mt-3 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm leading-6 text-blue-900">
-          Run 可能卡住；先同步或等待。
-        </p>
+        <div className="mt-3 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm leading-6 text-blue-900">
+          <div className="font-semibold">Agent run 已停滯</div>
+          <ul className="mt-2 list-disc space-y-1 pl-5">
+            <li>資料庫仍標示 running，但進度心跳已超過門檻。</li>
+            <li>
+              {blockedRunMissingOutput
+                ? "目前沒有 command output、artifact 或 error 回寫。"
+                : "目前已有部分輸出或錯誤，可先同步狀態確認。"}
+            </li>
+            <li>這不代表多個 codex.exe 都在跑同一個 Agent。</li>
+            <li>codex.exe app-server / Desktop 子程序屬於正常背景服務。</li>
+            <li>真正的 Agent 任務子程序會是 codex exec ...。</li>
+            {blockedRunMissingOutput ? (
+              <li>目前沒有明確 exec activity，只能判定 run 回報停滯。</li>
+            ) : null}
+            <li>先同步狀態；若仍無新進度，可重跑同一個 Agent。</li>
+          </ul>
+        </div>
       ) : null}
 
       {stageGate.recoveryKind === "handoff_schema" ? (
@@ -4231,6 +4321,22 @@ function BlockerRecoveryPanel({
               <Play className="h-4 w-4" />
             )}
             重跑 Agent
+          </Button>
+        ) : null}
+        {openRun ? (
+          <Button
+            className="gap-2"
+            disabled={loading}
+            onClick={onCancelRun}
+            type="button"
+            variant="outline"
+          >
+            {loading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <X className="h-4 w-4" />
+            )}
+            停止目前 Agent
           </Button>
         ) : null}
         <Button
@@ -5306,21 +5412,26 @@ function BackgroundJobBanner({
 }
 
 function WorkflowStatusDashboard({
+  loading,
   launcherState,
   latestRun,
   openRun,
+  onCancelRun,
   request,
   worker,
 }: {
+  loading: boolean;
   launcherState: LocalLauncherState;
   latestRun: WorkerRunView | null;
   openRun: WorkerRunView | null;
+  onCancelRun: () => void;
   request: WorkflowRequest;
   worker: WorkerRegistration | null;
 }) {
   const activeRun = openRun ?? latestRun;
   const isRunning = Boolean(openRun);
   const isQueuedRun = openRun?.status === "queued";
+  const cancelRequested = Boolean(openRun?.cancelRequestedAt);
   const launcherNeedsUpdate = launcherState.launcherVersionStatus === "mismatch";
   const workerProcessStopped = Boolean(
     openRun &&
@@ -5369,9 +5480,27 @@ function WorkflowStatusDashboard({
               : "這裡顯示最近一次 Local Worker 回報與目前工作流狀態。"}
           </p>
         </div>
-        <span className="inline-flex w-fit rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700">
-          {formatUiDeliveryMode(request.deliveryMode)}
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          {openRun ? (
+            <Button
+              className="gap-2"
+              disabled={loading || cancelRequested}
+              onClick={onCancelRun}
+              type="button"
+              variant="outline"
+            >
+              {loading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <X className="h-4 w-4" />
+              )}
+              {cancelRequested ? "停止中" : "停止 Agent"}
+            </Button>
+          ) : null}
+          <span className="inline-flex w-fit rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700">
+            {formatUiDeliveryMode(request.deliveryMode)}
+          </span>
+        </div>
       </div>
       <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
         <MiniBadge label="目前狀態" value={statusText} />
@@ -5429,6 +5558,14 @@ function WorkflowStatusDashboard({
               <MiniBadge
                 label="Retry"
                 value={openRun.isRetryContext ? "是" : "否"}
+              />
+              <MiniBadge
+                label="停止請求"
+                value={
+                  openRun.cancelRequestedAt
+                    ? formatTimestamp(openRun.cancelRequestedAt)
+                    : "無"
+                }
               />
             </div>
           ) : null}
@@ -6336,6 +6473,7 @@ function formatWorkerRunStatus(status: WorkerRunView["status"]) {
     completed: "已完成",
     failed: "失敗",
     blocked: "已阻擋",
+    cancelled: "已停止",
   };
 
   return labels[status];
@@ -6444,7 +6582,7 @@ function formatRecoveryPanelSummary(stageGate: StageGateResult) {
   }
 
   if (stageGate.recoveryKind === "stale_run") {
-    return "Run 可能卡住。";
+    return "Agent run 已停滯，不是仍在正常執行。";
   }
 
   if (stageGate.recoveryKind === "handoff_schema") {
@@ -6483,7 +6621,7 @@ function formatRecoveryNextStep(stageGate: StageGateResult) {
   }
 
   if (stageGate.recoveryKind === "stale_run") {
-    return "同步 / 等待";
+    return "同步後重跑 Agent";
   }
 
   if (stageGate.needsClarification) {

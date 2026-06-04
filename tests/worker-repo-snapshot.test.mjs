@@ -265,6 +265,7 @@ test("Agent3 uses Agent2 execution repo path when worker reports a request workt
     createRequest,
     dispatchNextAgent,
     getRequestDetail,
+    getStageGate,
     heartbeatWorkerRun,
     registerWorker,
     updateWorkerRepositoryCandidates,
@@ -632,6 +633,347 @@ test("incomplete Agent1 handoff auto-repairs once and recovery reruns same Agent
   assert.equal(
     afterClarification.runs.some((run) => run.agentRole === "agent2"),
     false,
+  );
+});
+
+test("stale running run is blocked before recovery reruns the same Agent", async () => {
+  const {
+    createRequest,
+    dispatchNextAgent,
+    getRequestDetail,
+    getStageGate,
+    heartbeatWorkerRun,
+    pollWorkerRun,
+    recoverWorkflowRequest,
+    registerWorker,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+
+  const worker = registerWorker({
+    workerId: `worker-stale-retry-${randomUUID()}`,
+    displayName: "Stale Retry Worker",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = "C:\\workspace\\repo-stale-retry";
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "repo-stale-retry", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+
+  const request = createRequest({
+    title: `Stale retry ${randomUUID()}`,
+    detail: "Add MJ.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+  });
+  const run = dispatchNextAgent({ requestId: request.requestId });
+  pollWorkerRun(worker.workerId, worker.token);
+  heartbeatWorkerRun(worker.workerId, worker.token, run.runId, {
+    progressLabel: "Running Codex",
+    progressDetail: "agent0 is executing.",
+    progressUpdatedAt: "2026-05-25T06:00:00.000Z",
+  });
+  const database = new DatabaseSync(process.env.CONTROL_PLANE_DB_PATH);
+  try {
+    database
+      .prepare(
+        `UPDATE worker_runs
+         SET updated_at = '2026-05-25T06:00:00.000Z',
+             progress_updated_at = '2026-05-25T06:00:00.000Z'
+         WHERE run_id = ?`,
+      )
+      .run(run.runId);
+  } finally {
+    database.close();
+  }
+
+  const retry = recoverWorkflowRequest({
+    requestId: request.requestId,
+    action: "retry_same_agent",
+    runId: run.runId,
+  });
+  const detail = getRequestDetail(request.requestId);
+  const staleRun = detail.runs.find((candidate) => candidate.runId === run.runId);
+  const retryRun = detail.runs.find(
+    (candidate) => candidate.runId === retry.runId,
+  );
+
+  assert.equal(staleRun.status, "blocked");
+  assert.match(staleRun.error, /stale_run/);
+  assert.equal(retryRun.agentRole, run.agentRole);
+  assert.equal(retryRun.retryOfRunId, run.runId);
+  assert.equal(retryRun.isRetryContext, true);
+});
+
+test("fresh running run cannot be recovered as a duplicate dispatch", async () => {
+  const {
+    createRequest,
+    dispatchNextAgent,
+    heartbeatWorkerRun,
+    pollWorkerRun,
+    recoverWorkflowRequest,
+    registerWorker,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+
+  const worker = registerWorker({
+    workerId: `worker-fresh-run-${randomUUID()}`,
+    displayName: "Fresh Run Worker",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = "C:\\workspace\\repo-fresh-run";
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "repo-fresh-run", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+
+  const request = createRequest({
+    title: `Fresh run ${randomUUID()}`,
+    detail: "Add MJ.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+  });
+  const run = dispatchNextAgent({ requestId: request.requestId });
+  pollWorkerRun(worker.workerId, worker.token);
+  heartbeatWorkerRun(worker.workerId, worker.token, run.runId, {
+    progressLabel: "Running Codex",
+    progressDetail: "agent0 is executing.",
+  });
+
+  assert.throws(
+    () =>
+      recoverWorkflowRequest({
+        requestId: request.requestId,
+        action: "retry_same_agent",
+        runId: run.runId,
+      }),
+    /Cannot start recovery while an Agent run is queued or running/,
+  );
+});
+
+test("queued run cancel removes it from worker polling", async () => {
+  const {
+    cancelWorkerRun,
+    createRequest,
+    dispatchNextAgent,
+    getRequestDetail,
+    pollWorkerRun,
+    registerWorker,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+
+  const worker = registerWorker({
+    workerId: `worker-queued-cancel-${randomUUID()}`,
+    displayName: "Queued Cancel Worker",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = "C:\\workspace\\repo-queued-cancel";
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "repo-queued-cancel", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+
+  const request = createRequest({
+    title: `Queued cancel ${randomUUID()}`,
+    detail: "Add MJ.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+  });
+  const run = dispatchNextAgent({ requestId: request.requestId });
+  const cancelled = cancelWorkerRun({
+    requestId: request.requestId,
+    runId: run.runId,
+    actor: "test",
+  });
+
+  assert.equal(cancelled.status, "cancelled");
+  assert.match(cancelled.error, /user_cancelled/);
+  assert.equal(pollWorkerRun(worker.workerId, worker.token), null);
+  assert.equal(getRequestDetail(request.requestId).runs[0].status, "cancelled");
+});
+
+test("stale running run cancel closes the run and allows retry", async () => {
+  const {
+    cancelWorkerRun,
+    createRequest,
+    dispatchNextAgent,
+    getRequestDetail,
+    getStageGate,
+    heartbeatWorkerRun,
+    pollWorkerRun,
+    recoverWorkflowRequest,
+    registerWorker,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+
+  const worker = registerWorker({
+    workerId: `worker-stale-cancel-${randomUUID()}`,
+    displayName: "Stale Cancel Worker",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = "C:\\workspace\\repo-stale-cancel";
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "repo-stale-cancel", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+
+  const request = createRequest({
+    title: `Stale cancel ${randomUUID()}`,
+    detail: "Add MJ.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+  });
+  const run = dispatchNextAgent({ requestId: request.requestId });
+  pollWorkerRun(worker.workerId, worker.token);
+  heartbeatWorkerRun(worker.workerId, worker.token, run.runId, {
+    progressLabel: "Running Codex",
+    progressDetail: "agent0 is executing.",
+  });
+
+  const database = new DatabaseSync(process.env.CONTROL_PLANE_DB_PATH);
+  database
+    .prepare(
+      `UPDATE worker_runs
+       SET updated_at = ?, progress_updated_at = ?
+       WHERE run_id = ?`,
+    )
+    .run("2026-05-25T06:00:00.000Z", "2026-05-25T06:00:00.000Z", run.runId);
+  database.close();
+
+  const cancelled = cancelWorkerRun({
+    requestId: request.requestId,
+    runId: run.runId,
+    actor: "test",
+  });
+  const cancelledStageGate = getStageGate(request.requestId);
+  const retry = recoverWorkflowRequest({
+    requestId: request.requestId,
+    action: "retry_same_agent",
+    runId: run.runId,
+  });
+  const detail = getRequestDetail(request.requestId);
+  const oldRun = detail.runs.find((candidate) => candidate.runId === run.runId);
+
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(oldRun.status, "cancelled");
+  assert.equal(cancelledStageGate.canManualRetry, true);
+  assert.equal(cancelledStageGate.needsClarification, false);
+  assert.equal(retry.retryOfRunId, run.runId);
+  assert.equal(retry.agentRole, run.agentRole);
+});
+
+test("fresh running run cancel requests worker termination without duplicate retry", async () => {
+  const {
+    cancelWorkerRun,
+    createRequest,
+    dispatchNextAgent,
+    heartbeatWorkerRun,
+    pollWorkerRun,
+    recoverWorkflowRequest,
+    registerWorker,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+
+  const worker = registerWorker({
+    workerId: `worker-fresh-cancel-${randomUUID()}`,
+    displayName: "Fresh Cancel Worker",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = "C:\\workspace\\repo-fresh-cancel";
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "repo-fresh-cancel", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+
+  const request = createRequest({
+    title: `Fresh cancel ${randomUUID()}`,
+    detail: "Add MJ.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+  });
+  const run = dispatchNextAgent({ requestId: request.requestId });
+  pollWorkerRun(worker.workerId, worker.token);
+  heartbeatWorkerRun(worker.workerId, worker.token, run.runId, {
+    progressLabel: "Running Codex",
+    progressDetail: "agent0 is executing.",
+  });
+
+  const cancelRequested = cancelWorkerRun({
+    requestId: request.requestId,
+    runId: run.runId,
+    actor: "test",
+  });
+
+  assert.equal(cancelRequested.status, "running");
+  assert.ok(cancelRequested.cancelRequestedAt);
+  assert.throws(
+    () =>
+      recoverWorkflowRequest({
+        requestId: request.requestId,
+        action: "retry_same_agent",
+        runId: run.runId,
+      }),
+    /Cannot start recovery while an Agent run is queued or running/,
   );
 });
 
