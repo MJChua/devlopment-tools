@@ -533,12 +533,61 @@ test("blocker summaries explain verified Work Item branch requirements", () => {
 
 test("blocker summaries explain outdated PR branches", () => {
   const summaries = summarizeStageGateBlockers([
+    [
+      "pr_branch_outdated: PR 分支尚未包含最新 origin/develop。",
+      "CONTROL_PLANE_BLOCKER_DIAGNOSTIC_START",
+      JSON.stringify({
+        kind: "pr_branch_outdated",
+        sourceBranch: "feature/795",
+        baseBranch: "origin/develop",
+        sourceSha: "67104c5",
+        baseSha: "eb3bff9",
+        aheadCount: 1,
+        behindCount: 45,
+        worktreePath:
+          "C:\\Users\\MichaelChao\\Documents\\.codex-request-worktrees\\DOC-202605291754-top-menu-mj-source",
+        changedFiles: [
+          "apps/admin-agent-web/src/components/AgentTopBar.vue",
+          "apps/admin-agent-web/src/styles/components/_topbar.scss",
+        ],
+        currentBranch: "feature/795",
+      }),
+      "CONTROL_PLANE_BLOCKER_DIAGNOSTIC_END",
+    ].join("\n"),
+  ]);
+
+  assert.equal(summaries.length, 1);
+  assert.equal(
+    summaries[0].title,
+    "PR 分支 feature/795 尚未更新到 origin/develop",
+  );
+  assert.match(summaries[0].reason, /不是本機 develop 沒更新/);
+  assert.match(summaries[0].nextAction, /Agent2/);
+  assert.deepEqual(
+    summaries[0].details?.map((detail) => detail.label),
+    [
+      "需要更新的是",
+      "Base branch",
+      "落後 origin/develop",
+      "PR 分支 ahead",
+      "要處理的位置",
+      "目前分支",
+      "目前分支變更檔案",
+    ],
+  );
+  assert.match(summaries[0].details?.[2]?.value ?? "", /45 commits/);
+  assert.match(summaries[0].warnings?.[0] ?? "", /可能是舊需求分支/);
+});
+
+test("blocker summaries keep outdated PR fallback readable without diagnostics", () => {
+  const summaries = summarizeStageGateBlockers([
     "pr_branch_outdated: Formal PR branch is behind origin/develop. The worker will not merge or rebase origin/develop automatically.",
   ]);
 
   assert.equal(summaries.length, 1);
-  assert.equal(summaries[0].title, "PR 分支落後 develop");
-  assert.match(summaries[0].nextAction, /Agent2/);
+  assert.equal(summaries[0].title, "PR 分支尚未更新到 origin/develop");
+  assert.match(summaries[0].reason, /不是本機 develop/);
+  assert.match(summaries[0].nextAction, /重跑 Agent2/);
 });
 
 test("blocker summaries merge UI-only target and expectation gaps", () => {

@@ -3,7 +3,26 @@ export type BlockerSummary = {
   reason: string;
   nextAction: string;
   original: string;
+  kind?: string;
+  details?: { label: string; value: string }[];
+  warnings?: string[];
 };
+
+type PrBranchOutdatedDiagnostic = {
+  kind: "pr_branch_outdated";
+  sourceBranch?: string;
+  baseBranch?: string;
+  sourceSha?: string;
+  baseSha?: string;
+  aheadCount?: number | null;
+  behindCount?: number | null;
+  worktreePath?: string;
+  changedFiles?: string[];
+  currentBranch?: string;
+};
+
+const blockerDiagnosticStart = "CONTROL_PLANE_BLOCKER_DIAGNOSTIC_START";
+const blockerDiagnosticEnd = "CONTROL_PLANE_BLOCKER_DIAGNOSTIC_END";
 
 export function summarizeStageGateBlockers(items: string[]): BlockerSummary[] {
   const summaries = items
@@ -39,6 +58,11 @@ export function summarizeStageGateBlockers(items: string[]): BlockerSummary[] {
 export function summarizeStageGateBlocker(item: string): BlockerSummary {
   const original = item.trim();
   const normalized = original.toLowerCase();
+  const diagnostic = parseBlockerDiagnostic(original);
+
+  if (diagnostic?.kind === "pr_branch_outdated") {
+    return summarizePrBranchOutdatedDiagnostic(original, diagnostic);
+  }
 
   if (
     normalized.includes("verified azure work item") ||
@@ -157,12 +181,13 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
       normalized.includes("will not merge or rebase"))
   ) {
     return {
-      title: "PR 分支落後 develop",
+      title: "PR 分支尚未更新到 origin/develop",
       reason:
-        "正式 PR 分支目前不包含最新 origin/develop；Worker 不會自動 merge 或 rebase，避免本地改寫 PR 分支。",
+        "這通常不是本機 develop 沒有拉到最新；阻擋點是正式 PR 分支尚未包含最新 base branch。",
       nextAction:
-        "先在 Azure Repos 或本機 Git 由人工更新該分支，確認乾淨後再重跑 Agent2。",
+        "到 Azure Repos 或列出的 worktree 更新 PR 分支，確認乾淨後重跑 Agent2。",
       original,
+      kind: "pr_branch_outdated",
     };
   }
 
@@ -310,6 +335,94 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
     nextAction: "閱讀原文技術細節，補上最小必要資料後重跑 Agent。",
     original,
   };
+}
+
+function summarizePrBranchOutdatedDiagnostic(
+  original: string,
+  diagnostic: PrBranchOutdatedDiagnostic,
+): BlockerSummary {
+  const sourceBranch = diagnostic.sourceBranch || "PR 分支";
+  const baseBranch = diagnostic.baseBranch || "origin/develop";
+  const details = [
+    { label: "需要更新的是", value: sourceBranch },
+    { label: "Base branch", value: baseBranch },
+    diagnostic.behindCount != null
+      ? { label: `落後 ${baseBranch}`, value: `${diagnostic.behindCount} commits` }
+      : null,
+    diagnostic.aheadCount != null
+      ? { label: "PR 分支 ahead", value: `${diagnostic.aheadCount} commits` }
+      : null,
+    diagnostic.worktreePath
+      ? { label: "要處理的位置", value: diagnostic.worktreePath }
+      : null,
+    diagnostic.currentBranch
+      ? { label: "目前分支", value: diagnostic.currentBranch }
+      : null,
+    diagnostic.changedFiles?.length
+      ? {
+          label: "目前分支變更檔案",
+          value: formatChangedFiles(diagnostic.changedFiles),
+        }
+      : null,
+  ].filter((item): item is { label: string; value: string } => Boolean(item));
+  const warnings = diagnostic.changedFiles?.length
+    ? ["此 PR 分支可能是舊需求分支，請確認是否要重用。"]
+    : undefined;
+
+  return {
+    title: `PR 分支 ${sourceBranch} 尚未更新到 ${baseBranch}`,
+    reason:
+      `不是本機 develop 沒更新。阻擋點是正式 PR 分支 ${sourceBranch} 尚未包含最新 ${baseBranch}。`,
+    nextAction:
+      `到列出的 worktree 或 Azure Repos 更新 ${sourceBranch}，確認乾淨後重跑 Agent2。`,
+    original,
+    kind: "pr_branch_outdated",
+    details,
+    warnings,
+  };
+}
+
+function parseBlockerDiagnostic(
+  value: string,
+): PrBranchOutdatedDiagnostic | null {
+  const start = value.indexOf(blockerDiagnosticStart);
+  const end = value.indexOf(blockerDiagnosticEnd);
+  if (start < 0 || end < 0 || end <= start) {
+    return null;
+  }
+
+  const json = value
+    .slice(start + blockerDiagnosticStart.length, end)
+    .trim();
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (!isPrBranchOutdatedDiagnostic(parsed)) {
+      return null;
+    }
+
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function isPrBranchOutdatedDiagnostic(
+  value: unknown,
+): value is PrBranchOutdatedDiagnostic {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  return (value as { kind?: unknown }).kind === "pr_branch_outdated";
+}
+
+function formatChangedFiles(files: string[]) {
+  const visible = files.slice(0, 5).join(", ");
+  if (files.length <= 5) {
+    return visible;
+  }
+
+  return `${visible}，另 ${files.length - 5} 個`;
 }
 
 function splitBlockerItem(item: string) {

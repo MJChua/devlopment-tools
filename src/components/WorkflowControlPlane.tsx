@@ -4051,6 +4051,7 @@ function BlockerRecoveryPanel({
   const workerVersionMismatch =
     stageGate.recoveryKind === "worker_version_mismatch" ||
     stageGate.recoveryKind === "worker_runtime_error";
+  const prBranchOutdated = stageGate.recoveryKind === "pr_branch_outdated";
   const blockedAgent = stageGate.blockedAgentRole
     ? formatUiAgentRole(stageGate.blockedAgentRole)
     : blockedRun
@@ -4089,22 +4090,24 @@ function BlockerRecoveryPanel({
         </Button>
       </div>
 
-      <div className="mt-3 grid gap-2 md:grid-cols-4">
-        <MiniBadge label="卡住 Agent" value={blockedAgent} />
-        <MiniBadge
-          label="最後 run"
-          value={
-            blockedRun
-              ? `${formatWorkerRunStatus(blockedRun.status)} / ${blockedRun.runId.slice(0, 8)}`
-              : "未判定"
-          }
-        />
-        <MiniBadge
-          label="Worker 心跳"
-          value={`${formatTimestamp(worker?.lastSeenAt)}${workerStale ? " / stale" : ""}`}
-        />
-        <MiniBadge label="下一步" value={formatRecoveryNextStep(stageGate)} />
-      </div>
+      {prBranchOutdated ? null : (
+        <div className="mt-3 grid gap-2 md:grid-cols-4">
+          <MiniBadge label="卡住 Agent" value={blockedAgent} />
+          <MiniBadge
+            label="最後 run"
+            value={
+              blockedRun
+                ? `${formatWorkerRunStatus(blockedRun.status)} / ${blockedRun.runId.slice(0, 8)}`
+                : "未判定"
+            }
+          />
+          <MiniBadge
+            label="Worker 心跳"
+            value={`${formatTimestamp(worker?.lastSeenAt)}${workerStale ? " / stale" : ""}`}
+          />
+          <MiniBadge label="下一步" value={formatRecoveryNextStep(stageGate)} />
+        </div>
+      )}
 
       {stageGate.recoveryKind === "stale_run" && blockedRun ? (
         <div className="mt-3 grid gap-2 md:grid-cols-4">
@@ -4132,6 +4135,33 @@ function BlockerRecoveryPanel({
       ) : null}
 
       <BlockerSummaryList items={stageGate.blockers} />
+
+      {prBranchOutdated ? (
+        <details className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+          <summary className="cursor-pointer font-semibold text-slate-700">
+            診斷詳情
+          </summary>
+          <div className="mt-3 grid gap-2 md:grid-cols-4">
+            <MiniBadge label="卡住 Agent" value={blockedAgent} />
+            <MiniBadge
+              label="最後 run"
+              value={
+                blockedRun
+                  ? `${formatWorkerRunStatus(blockedRun.status)} / ${blockedRun.runId.slice(0, 8)}`
+                  : "未判定"
+              }
+            />
+            <MiniBadge
+              label="Worker 心跳"
+              value={`${formatTimestamp(worker?.lastSeenAt)}${workerStale ? " / stale" : ""}`}
+            />
+            <MiniBadge
+              label="下一步"
+              value={formatRecoveryNextStep(stageGate)}
+            />
+          </div>
+        </details>
+      ) : null}
 
       {workerOffline && launcherHasProfile ? (
         <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-900">
@@ -5673,9 +5703,19 @@ function BlockerSummaryList({ items }: { items: string[] }) {
 }
 
 function BlockerSummaryCard({ summary }: { summary: BlockerSummary }) {
+  const isPrBranchOutdated = summary.kind === "pr_branch_outdated";
   return (
-    <div className="rounded-md border border-red-100 bg-white p-3">
+    <div
+      className={`rounded-md border bg-white p-3 ${
+        isPrBranchOutdated ? "border-amber-300" : "border-red-100"
+      }`}
+    >
       <div className="text-sm font-semibold text-red-900">{summary.title}</div>
+      {isPrBranchOutdated ? (
+        <div className="mt-2 text-sm font-semibold text-amber-900">
+          不是 develop 沒拉最新，需要更新的是 PR 分支。
+        </div>
+      ) : null}
       <div className="mt-2 grid gap-2 text-sm leading-6 text-slate-700 md:grid-cols-2">
         <div>
           <div className="text-xs font-semibold text-slate-500">
@@ -5690,6 +5730,28 @@ function BlockerSummaryCard({ summary }: { summary: BlockerSummary }) {
           <p className="mt-1">{summary.nextAction}</p>
         </div>
       </div>
+      {summary.details?.length ? (
+        <div className="mt-3 grid gap-2 text-sm md:grid-cols-2">
+          {summary.details.map((detail) => (
+            <div
+              className="min-w-0 rounded-md border border-slate-200 bg-slate-50 p-2"
+              key={`${detail.label}-${detail.value}`}
+            >
+              <div className="text-xs font-semibold text-slate-500">
+                {detail.label}
+              </div>
+              <div className="mt-1 break-words font-semibold text-slate-900">
+                {detail.value}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {summary.warnings?.length ? (
+        <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-2 text-sm font-semibold leading-6 text-amber-900">
+          {summary.warnings.join(" ")}
+        </div>
+      ) : null}
     </div>
   );
 }

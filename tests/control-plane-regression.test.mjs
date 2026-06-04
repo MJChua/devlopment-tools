@@ -126,6 +126,10 @@ test("local worker pushes formal PR branches without merging develop locally", (
   assert.doesNotMatch(source, /git merge --no-edit origin\/develop/);
   assert.doesNotMatch(source, /Merging origin\/develop/);
   assert.match(source, /git merge-base --is-ancestor origin\/develop HEAD/);
+  assert.match(source, /CONTROL_PLANE_BLOCKER_DIAGNOSTIC_START/);
+  assert.match(source, /git rev-list --left-right --count origin\/develop\.\.\.HEAD/);
+  assert.match(source, /git diff --name-only origin\/develop\.\.\.HEAD/);
+  assert.match(source, /不是本機 develop 沒有拉到最新/);
   assert.match(source, /pr_branch_outdated/);
   assert.match(source, /origin\/\$\{branchName\}/);
   assert.equal((source.match(/git push/g) ?? []).length, 1);
@@ -232,6 +236,10 @@ test("workflow UI keeps launcher recovery guidance concise", () => {
   assert.match(source, /Agent 任務子程序會是 codex exec/);
   assert.match(source, /沒有明確 exec activity，只能判定 run 回報停滯/);
   assert.match(source, /同步後重跑 Agent/);
+  assert.match(source, /診斷詳情/);
+  assert.match(source, /不是 develop 沒拉最新/);
+  assert.match(source, /需要更新的是 PR 分支/);
+  assert.match(source, /原文技術細節/);
   assert.doesNotMatch(source, /Launcher 目前是暫時啟動模式/);
   assert.doesNotMatch(source, /目前 worker 可以使用，但 Scheduled Task 尚未正式安裝/);
   assert.doesNotMatch(source, /重開機或重新登入後穩定性取決於 Startup/);

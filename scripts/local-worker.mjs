@@ -35,6 +35,8 @@ const intervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS || 5000);
 const pollRetryDelaysMs = [5000, 10000, 30000];
 const completionRetryDelaysMs = [5000, 10000, 30000];
 const runCancelCheckIntervalMs = 5000;
+const blockerDiagnosticStart = "CONTROL_PLANE_BLOCKER_DIAGNOSTIC_START";
+const blockerDiagnosticEnd = "CONTROL_PLANE_BLOCKER_DIAGNOSTIC_END";
 const once = process.argv.includes("--once");
 const setupOnly = process.argv.includes("--setup-only");
 const skippedRepositoryScanDirs = new Set([
@@ -801,14 +803,80 @@ async function ensurePrBranchIncludesDevelop(worktreePath, branchName) {
   }
 
   if (result.exitCode === 1) {
+    const diagnostic = await buildPrBranchOutdatedDiagnostic(
+      worktreePath,
+      branchName,
+    );
     throw new Error(
-      `PR branch ${branchName} is behind origin/develop. Update the branch manually in Azure Repos or Git, then rerun Agent2. The worker will not merge or rebase origin/develop automatically.`,
+      formatPrBranchOutdatedError(diagnostic),
     );
   }
 
   throw new Error(
     `Cannot compare ${branchName} with origin/develop: ${result.output.trim()}`,
   );
+}
+
+async function buildPrBranchOutdatedDiagnostic(worktreePath, branchName) {
+  const [baseSha, sourceSha, currentBranch, counts, changedFiles] =
+    await Promise.all([
+      readGitOutput("git rev-parse origin/develop", worktreePath),
+      readGitOutput("git rev-parse HEAD", worktreePath),
+      readGitOutput("git branch --show-current", worktreePath),
+      readGitOutput(
+        "git rev-list --left-right --count origin/develop...HEAD",
+        worktreePath,
+      ),
+      readGitOutput("git diff --name-only origin/develop...HEAD", worktreePath),
+    ]);
+  const [behindText, aheadText] = counts.split(/\s+/);
+
+  return {
+    kind: "pr_branch_outdated",
+    sourceBranch: branchName || currentBranch || "HEAD",
+    baseBranch: "origin/develop",
+    sourceSha,
+    baseSha,
+    aheadCount: parseNullableCount(aheadText),
+    behindCount: parseNullableCount(behindText),
+    worktreePath,
+    changedFiles: parseCommandOutputLines(changedFiles),
+    currentBranch: currentBranch || "HEAD",
+  };
+}
+
+async function readGitOutput(command, cwd) {
+  const result = await runCommand(command, cwd, {}, 15000);
+  if (result.exitCode !== 0) {
+    return "";
+  }
+
+  return result.output.trim();
+}
+
+function parseNullableCount(value) {
+  const count = Number(value);
+  return Number.isFinite(count) ? count : null;
+}
+
+function formatPrBranchOutdatedError(diagnostic) {
+  const sourceBranch = diagnostic.sourceBranch || "PR 分支";
+  const baseBranch = diagnostic.baseBranch || "origin/develop";
+  return [
+    `PR 分支 ${sourceBranch} 尚未包含最新 ${baseBranch}。`,
+    `這不是本機 develop 沒有拉到最新；需要更新的是 PR 分支 ${sourceBranch}。`,
+    "Worker 不會自動 merge/rebase PR 分支，避免覆蓋或改寫共同開發中的分支。",
+    "",
+    formatBlockerDiagnostic(diagnostic),
+  ].join("\n");
+}
+
+function formatBlockerDiagnostic(diagnostic) {
+  return [
+    blockerDiagnosticStart,
+    JSON.stringify(diagnostic, null, 2),
+    blockerDiagnosticEnd,
+  ].join("\n");
 }
 
 async function runGitOrThrow(command, cwd, timeoutMs = 120000) {
@@ -1262,7 +1330,7 @@ function formatBlockedWorkerError(error) {
   }
 
   if (isPrBranchOutdatedError(message)) {
-    return `pr_branch_outdated: Formal PR branch is behind origin/develop. Update the branch manually in Azure Repos or Git, then rerun Agent2. Original error: ${message}`;
+    return `pr_branch_outdated: PR 分支尚未包含最新 origin/develop。這不是本機 develop 沒有拉到最新；Worker 不會自動 merge/rebase PR 分支。Original error: ${message}`;
   }
 
   if (isRepoDirtyError(message)) {
