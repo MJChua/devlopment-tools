@@ -2987,11 +2987,6 @@ export function WorkflowControlPlane() {
                       <span className="inline-flex min-h-7 min-w-[6.5rem] items-center justify-center rounded-md border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-700">
                         {formatUiDeliveryMode(request.deliveryMode)}
                       </span>
-                      <span className="inline-flex min-h-7 min-w-[8rem] items-center justify-center rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-600">
-                        {request.assignedWorkerId
-                          ? `Worker: ${request.assignedWorkerId}`
-                          : "尚未指派 Worker"}
-                      </span>
                       <StageBadge
                         className="ml-auto w-28 shrink-0 justify-center"
                         stage={request.status}
@@ -3005,16 +3000,12 @@ export function WorkflowControlPlane() {
 
           <Panel
             icon={<ShieldCheck className="h-4 w-4" />}
-            title="處理進度"
+            title="需求詳情"
           >
-            <div className="mb-4">
-              <WorkflowStrip activeStage={selectedRequest?.status ?? "intake"} />
-            </div>
             {!selectedRequest || !detail ? (
-              <EmptyState text="尚未選取需求。送出新需求後，這裡會顯示 Codex 處理進度。" />
+              <EmptyState text="尚未選取需求。送出新需求後，這裡會顯示需求詳情。" />
             ) : (
               <div className="flex flex-col gap-4">
-                <RequestSubmitTimeline detail={detail} />
                 <div className="rounded-md border border-slate-200 bg-slate-50 p-4">
                   <div className="flex min-w-0 flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
                     <div className="min-w-0">
@@ -3056,28 +3047,6 @@ export function WorkflowControlPlane() {
                   </div>
                 </div>
 
-                <div className="grid gap-3 md:grid-cols-5">
-                  <Metric
-                    label="下一步"
-                    value={nextAgent ? formatPublicNextStep(nextAgent) : "無"}
-                  />
-                  <Metric
-                    label="交付模式"
-                    value={formatUiDeliveryMode(selectedRequest.deliveryMode)}
-                  />
-                  <Metric
-                    label="Worker"
-                    value={
-                      selectedRequest.assignedWorkerId || "未指派"
-                    }
-                  />
-                  <Metric
-                    label="Repo"
-                    value={getPathLeaf(selectedRequest.repoPath) || "未選擇"}
-                  />
-                  <Metric label="執行次數" value={String(detail.runs.length)} />
-                </div>
-
                 <WorkflowStatusDashboard
                   loading={state === "loading"}
                   launcherState={launcherState}
@@ -3087,7 +3056,6 @@ export function WorkflowControlPlane() {
                   worker={selectedWorker}
                   onCancelRun={cancelCurrentAgentRun}
                 />
-                {stageGate ? <StageGateSummary stageGate={stageGate} /> : null}
                 {stageGate ? (
                   <BlockerRecoveryPanel
                     latestRun={latestRun}
@@ -3390,129 +3358,6 @@ function WorkspaceTabButton({
       </span>
     </button>
   );
-}
-
-function WorkflowStrip({ activeStage }: { activeStage: WorkflowRequest["status"] }) {
-  const steps: Array<{ label: string; stages: WorkflowRequest["status"][] }> = [
-    { label: "輸入需求", stages: ["intake", "dispatched"] },
-    { label: "確認來源", stages: ["source_check", "ready_for_implementation"] },
-    { label: "Codex 處理", stages: ["running", "review"] },
-    { label: "PR 追蹤", stages: ["pr_ready", "pr_created", "delivered"] },
-  ];
-
-  return (
-    <section className="grid gap-2 md:grid-cols-4">
-      {steps.map((step, index) => {
-        const active = step.stages.includes(activeStage);
-        return (
-          <div
-            className={`rounded-md border p-3 ${
-              active
-                ? "border-blue-500 bg-blue-50"
-                : "border-slate-200 bg-white"
-            }`}
-            key={step.label}
-          >
-            <div className="text-xs font-semibold text-slate-500">
-              流程 {index + 1}
-            </div>
-            <div className="mt-1 text-sm font-semibold text-slate-950">
-              {step.label}
-            </div>
-          </div>
-        );
-      })}
-    </section>
-  );
-}
-
-function RequestSubmitTimeline({ detail }: { detail: WorkflowRequestDetail }) {
-  const agent0 = getLatestRunForAgent(detail.runs, "agent0");
-  const agent1 = getLatestRunForAgent(detail.runs, "agent1");
-  const steps = [
-    {
-      label: "已建立需求",
-      detail: formatTimestamp(detail.request.createdAt),
-      status: "done" as const,
-    },
-    {
-      label: "附件已處理",
-      detail:
-        detail.attachments.length > 0
-          ? `${detail.attachments.length} 張圖片`
-          : "無附件",
-      status: "done" as const,
-    },
-    {
-      label: "Agent0 判讀",
-      detail: agent0 ? formatWorkerRunStatus(agent0.status) : "等待派工",
-      status: getTimelineStepStatus(agent0),
-    },
-    {
-      label: "Agent1 來源確認",
-      detail: agent1 ? formatWorkerRunStatus(agent1.status) : "等待 Agent0",
-      status: getTimelineStepStatus(agent1),
-    },
-  ];
-
-  return (
-    <div className="rounded-md border border-slate-200 bg-white p-3">
-      <div className="text-xs font-semibold text-slate-500">送出後進度</div>
-      <div className="mt-3 grid gap-2 md:grid-cols-4">
-        {steps.map((step) => (
-          <div
-            className={`rounded-md border p-3 ${
-              step.status === "active"
-                ? "border-blue-200 bg-blue-50"
-                : step.status === "blocked"
-                  ? "border-amber-200 bg-amber-50"
-                  : "border-slate-200 bg-slate-50"
-            }`}
-            key={step.label}
-          >
-            <div className="flex items-center gap-2 text-sm font-semibold text-slate-950">
-              {step.status === "active" ? (
-                <Loader2 className="h-4 w-4 animate-spin text-blue-700" />
-              ) : step.status === "blocked" ? (
-                <AlertTriangle className="h-4 w-4 text-amber-700" />
-              ) : (
-                <CheckCircle2 className="h-4 w-4 text-green-700" />
-              )}
-              <span>{step.label}</span>
-            </div>
-            <div className="mt-1 text-xs text-slate-600">{step.detail}</div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function getLatestRunForAgent(
-  runs: WorkflowRequestDetail["runs"],
-  agentRole: WorkerRunView["agentRole"],
-) {
-  return [...runs].reverse().find((run) => run.agentRole === agentRole) ?? null;
-}
-
-function getTimelineStepStatus(run: WorkerRunView | null) {
-  if (!run) {
-    return "pending" as const;
-  }
-
-  if (run.status === "queued" || run.status === "running") {
-    return "active" as const;
-  }
-
-  if (
-    run.status === "failed" ||
-    run.status === "blocked" ||
-    run.status === "cancelled"
-  ) {
-    return "blocked" as const;
-  }
-
-  return "done" as const;
 }
 
 function StagedAttachmentList({
@@ -4052,6 +3897,13 @@ function BlockerRecoveryPanel({
     stageGate.recoveryKind === "worker_version_mismatch" ||
     stageGate.recoveryKind === "worker_runtime_error";
   const prBranchOutdated = stageGate.recoveryKind === "pr_branch_outdated";
+  const showDiagnostics =
+    prBranchOutdated ||
+    stageGate.recoveryKind === "stale_run" ||
+    stageGate.recoveryKind === "handoff_schema" ||
+    workerOffline ||
+    workerInternalError ||
+    workerVersionMismatch;
   const blockedAgent = stageGate.blockedAgentRole
     ? formatUiAgentRole(stageGate.blockedAgentRole)
     : blockedRun
@@ -4090,53 +3942,9 @@ function BlockerRecoveryPanel({
         </Button>
       </div>
 
-      {prBranchOutdated ? null : (
-        <div className="mt-3 grid gap-2 md:grid-cols-4">
-          <MiniBadge label="卡住 Agent" value={blockedAgent} />
-          <MiniBadge
-            label="最後 run"
-            value={
-              blockedRun
-                ? `${formatWorkerRunStatus(blockedRun.status)} / ${blockedRun.runId.slice(0, 8)}`
-                : "未判定"
-            }
-          />
-          <MiniBadge
-            label="Worker 心跳"
-            value={`${formatTimestamp(worker?.lastSeenAt)}${workerStale ? " / stale" : ""}`}
-          />
-          <MiniBadge label="下一步" value={formatRecoveryNextStep(stageGate)} />
-        </div>
-      )}
-
-      {stageGate.recoveryKind === "stale_run" && blockedRun ? (
-        <div className="mt-3 grid gap-2 md:grid-cols-4">
-          <MiniBadge
-            label="Run 更新"
-            value={formatTimestamp(blockedRun.updatedAt)}
-          />
-          <MiniBadge
-            label="進度更新"
-            value={formatTimestamp(blockedRun.progressUpdatedAt)}
-          />
-          <MiniBadge
-            label="輸出"
-            value={blockedRun.commandOutput.trim() ? "有" : "無"}
-          />
-          <MiniBadge
-            label="Artifact/Error"
-            value={
-              blockedRun.artifact.trim() || blockedRun.error.trim()
-                ? "有"
-                : "無"
-            }
-          />
-        </div>
-      ) : null}
-
       <BlockerSummaryList items={stageGate.blockers} />
 
-      {prBranchOutdated ? (
+      {showDiagnostics ? (
         <details className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
           <summary className="cursor-pointer font-semibold text-slate-700">
             診斷詳情
@@ -4160,6 +3968,30 @@ function BlockerRecoveryPanel({
               value={formatRecoveryNextStep(stageGate)}
             />
           </div>
+          {stageGate.recoveryKind === "stale_run" && blockedRun ? (
+            <div className="mt-3 grid gap-2 md:grid-cols-4">
+              <MiniBadge
+                label="Run 更新"
+                value={formatTimestamp(blockedRun.updatedAt)}
+              />
+              <MiniBadge
+                label="進度更新"
+                value={formatTimestamp(blockedRun.progressUpdatedAt)}
+              />
+              <MiniBadge
+                label="輸出"
+                value={blockedRun.commandOutput.trim() ? "有" : "無"}
+              />
+              <MiniBadge
+                label="Artifact/Error"
+                value={
+                  blockedRun.artifact.trim() || blockedRun.error.trim()
+                    ? "有"
+                    : "無"
+                }
+              />
+            </div>
+          ) : null}
         </details>
       ) : null}
 
@@ -5318,67 +5150,11 @@ function MiniBadge({ label, value }: { label: string; value: string }) {
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md border border-slate-200 bg-white p-3">
-      <div className="text-xs font-semibold text-slate-500">{label}</div>
-      <div className="mt-1 break-words text-sm font-semibold text-slate-950">
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function StageGateSummary({ stageGate }: { stageGate: StageGateResult }) {
-  const needsAttention = stageGate.status !== "ready";
-  const display = formatStageGateDisplay(stageGate);
-  const blockerCount = summarizeStageGateBlockers(stageGate.blockers).length;
-  const blockedAgent = stageGate.blockedAgentRole
-    ? formatUiAgentRole(stageGate.blockedAgentRole)
-    : "未判定";
-
-  return (
-    <div
-      className={`rounded-md border p-4 ${
-        needsAttention
-          ? "border-amber-200 bg-amber-50"
-          : "border-green-200 bg-green-50"
-      }`}
-    >
-      <div className="flex items-center gap-2">
-        <div className="text-sm font-semibold text-slate-950">
-          {display.label}
-        </div>
-        <span className="rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700">
-          {display.status}
-        </span>
-      </div>
-      <p className="mt-2 text-sm text-slate-600">{display.summary}</p>
-      {needsAttention ? (
-        <div className="mt-3 grid gap-2 sm:grid-cols-3">
-          <MiniBadge label="卡住 Agent" value={blockedAgent} />
-          <MiniBadge
-            label="需補項目"
-            value={blockerCount > 0 ? `${blockerCount} 項` : "無"}
-          />
-          <a
-            className="rounded-md border border-amber-200 bg-white px-3 py-2 text-sm font-semibold text-amber-900 hover:border-amber-300"
-            href="#blocker-recovery-panel"
-          >
-            到阻擋處理台
-          </a>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 function BackgroundJobBanner({
   detail,
   loading,
   message,
   request,
-  worker,
 }: {
   detail: WorkflowRequestDetail | null;
   loading: boolean;
@@ -5395,8 +5171,6 @@ function BackgroundJobBanner({
       ? detail.runs
       : [];
   const openRun = runs.find(isOpenWorkerRun) ?? null;
-  const latestRun = runs[runs.length - 1] ?? null;
-  const activeRun = openRun ?? latestRun;
   const status = openRun
     ? `${formatUiAgentRole(openRun.agentRole)} ${formatWorkerRunStatus(openRun.status)}`
     : request
@@ -5421,20 +5195,8 @@ function BackgroundJobBanner({
               "App 正在更新處理進度。"}
           </p>
         </div>
-        <div className="grid min-w-0 gap-2 sm:grid-cols-4 lg:min-w-[620px]">
+        <div className="min-w-0 lg:min-w-56">
           <MiniBadge label="目前步驟" value={status} />
-          <MiniBadge
-            label="Run"
-            value={activeRun ? activeRun.runId.slice(0, 8) : "尚未建立"}
-          />
-          <MiniBadge
-            label="Worker 心跳"
-            value={formatTimestamp(worker?.lastSeenAt)}
-          />
-          <MiniBadge
-            label="最新更新"
-            value={formatTimestamp(activeRun?.updatedAt ?? request?.updatedAt)}
-          />
         </div>
       </div>
     </div>
@@ -5491,6 +5253,20 @@ function WorkflowStatusDashboard({
   const isPacketLarge = Boolean(
     openRun && openRun.packetSizeChars > PACKET_SIZE_WARNING_CHARS,
   );
+  const workerStale = Boolean(
+    worker?.lastSeenAt && isStaleTimestamp(worker.lastSeenAt),
+  );
+  const shouldShowStatus =
+    isRunning ||
+    workerStale ||
+    launcherNeedsUpdate ||
+    workerProcessStopped ||
+    isPastSoftTimeout ||
+    isPacketLarge;
+
+  if (!shouldShowStatus) {
+    return null;
+  }
 
   return (
     <div
@@ -5507,7 +5283,7 @@ function WorkflowStatusDashboard({
           <p className="mt-1 text-sm leading-6 text-slate-600">
             {isRunning
               ? "Local Worker 正在執行；完成後 App 會自動刷新並排下一個 Agent，直到需要人工決策或交付完成。"
-              : "這裡顯示最近一次 Local Worker 回報與目前工作流狀態。"}
+              : `目前狀態：${statusText}。若流程暫停，請處理下方阻擋項目。`}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -5527,25 +5303,7 @@ function WorkflowStatusDashboard({
               {cancelRequested ? "停止中" : "停止 Agent"}
             </Button>
           ) : null}
-          <span className="inline-flex w-fit rounded-full bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700">
-            {formatUiDeliveryMode(request.deliveryMode)}
-          </span>
         </div>
-      </div>
-      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-        <MiniBadge label="目前狀態" value={statusText} />
-        <MiniBadge
-          label="Worker 心跳"
-          value={formatTimestamp(worker?.lastSeenAt)}
-        />
-        <MiniBadge
-          label="執行時間"
-          value={activeRun ? formatRunDuration(activeRun) : "尚未開始"}
-        />
-        <MiniBadge
-          label="最新更新"
-          value={formatTimestamp(activeRun?.updatedAt ?? request.updatedAt)}
-        />
       </div>
       {isRunning ? (
         <div className="mt-3 rounded-md border border-blue-200 bg-white/75 p-3 text-sm leading-6 text-slate-700">
@@ -5561,43 +5319,59 @@ function WorkflowStatusDashboard({
             </p>
           ) : null}
           {openRun ? (
-            <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-              <MiniBadge label="Run" value={formatWorkerRunStatus(openRun.status)} />
-              <MiniBadge label={runtimeLabel} value={formatRunDuration(openRun)} />
-              <MiniBadge
-                label="Launcher"
-                value={
-                  launcherState.available
-                    ? launcherState.running
-                      ? "執行中"
-                      : launcherNeedsUpdate
-                        ? "需更新"
-                        : "已停止"
-                    : "未啟動"
-                }
-              />
-              <MiniBadge label="Packet" value={formatPacketSize(openRun.packetSizeChars)} />
-              <MiniBadge
-                label="Handoff"
-                value={`${openRun.priorHandoffCount} 份`}
-              />
-              <MiniBadge
-                label="Snapshot"
-                value={openRun.usedResumeSnapshot ? "有" : "無"}
-              />
-              <MiniBadge
-                label="Retry"
-                value={openRun.isRetryContext ? "是" : "否"}
-              />
-              <MiniBadge
-                label="停止請求"
-                value={
-                  openRun.cancelRequestedAt
-                    ? formatTimestamp(openRun.cancelRequestedAt)
-                    : "無"
-                }
-              />
-            </div>
+            <details className="mt-3 text-xs text-slate-500">
+              <summary className="cursor-pointer font-semibold text-slate-600">
+                技術詳情
+              </summary>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <MiniBadge
+                  label="Run"
+                  value={`${formatWorkerRunStatus(openRun.status)} / ${openRun.runId.slice(0, 8)}`}
+                />
+                <MiniBadge label={runtimeLabel} value={formatRunDuration(openRun)} />
+                <MiniBadge
+                  label="Launcher"
+                  value={
+                    launcherState.available
+                      ? launcherState.running
+                        ? "執行中"
+                        : launcherNeedsUpdate
+                          ? "需更新"
+                          : "已停止"
+                      : "未啟動"
+                  }
+                />
+                <MiniBadge label="Packet" value={formatPacketSize(openRun.packetSizeChars)} />
+                <MiniBadge
+                  label="Handoff"
+                  value={`${openRun.priorHandoffCount} 份`}
+                />
+                <MiniBadge
+                  label="Snapshot"
+                  value={openRun.usedResumeSnapshot ? "有" : "無"}
+                />
+                <MiniBadge
+                  label="Retry"
+                  value={openRun.isRetryContext ? "是" : "否"}
+                />
+                <MiniBadge
+                  label="停止請求"
+                  value={
+                    openRun.cancelRequestedAt
+                      ? formatTimestamp(openRun.cancelRequestedAt)
+                      : "無"
+                  }
+                />
+                <MiniBadge
+                  label="Worker 心跳"
+                  value={formatTimestamp(worker?.lastSeenAt)}
+                />
+                <MiniBadge
+                  label="最新更新"
+                  value={formatTimestamp(activeRun?.updatedAt ?? request.updatedAt)}
+                />
+              </div>
+            </details>
           ) : null}
           {workerProcessStopped || launcherNeedsUpdate ? (
             <details className="mt-2 text-xs text-slate-500">
@@ -5629,6 +5403,11 @@ function WorkflowStatusDashboard({
             </p>
           ) : null}
         </div>
+      ) : null}
+      {!isRunning && workerStale ? (
+        <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900">
+          Worker 心跳已久未更新：{formatTimestamp(worker?.lastSeenAt)}
+        </p>
       ) : null}
     </div>
   );
@@ -6714,100 +6493,6 @@ function formatRecoveryNextStep(stageGate: StageGateResult) {
   }
 
   return "查看阻擋原因";
-}
-
-function formatStageGateDisplay(stageGate: StageGateResult) {
-  const statusLabels: Record<StageGateResult["status"], string> = {
-    ready: "可繼續",
-    waiting: "等待中",
-    blocked: "已阻擋",
-    "human-decision": "等待人工決策",
-  };
-
-  if (stageGate.status === "waiting") {
-    if (stageGate.recoveryKind === "worker_offline") {
-      return {
-        status: statusLabels[stageGate.status],
-        label: "Worker 已停止，Agent 尚未開始",
-        summary:
-          "Agent 已排入佇列；重啟 Worker 後會接續同一筆 run。",
-      };
-    }
-
-    return {
-      status: statusLabels[stageGate.status],
-      label: "worker 執行中",
-      summary: "正在等待本機 worker 回傳產物，App 會自動更新後續狀態。",
-    };
-  }
-
-  if (
-    stageGate.status === "human-decision" &&
-    stageGate.label.toLowerCase().includes("pr")
-  ) {
-    return {
-      status: statusLabels[stageGate.status],
-      label: "等待 Azure PR 追蹤",
-      summary:
-        "Agent3 已完成審查，App 會偵測並追蹤 Azure Repos 中對應分支的 active PR。",
-    };
-  }
-
-  if (stageGate.status === "human-decision") {
-    const isPrApproval = stageGate.label.toLowerCase().includes("pr");
-    return {
-      status: statusLabels[stageGate.status],
-      label: isPrApproval ? "等待 Azure PR 追蹤" : "需要人工確認",
-      summary: isPrApproval
-        ? "Agent3 已完成審查，App 會偵測並追蹤 Azure Repos 中對應分支的 active PR。"
-        : "此需求包含需要人工確認的範圍或風險，App 不會自動續跑。",
-    };
-  }
-
-  if (stageGate.status === "blocked") {
-    if (
-      stageGate.recoveryKind === "worker_version_mismatch" ||
-      stageGate.recoveryKind === "worker_runtime_error"
-    ) {
-      return {
-        status: statusLabels[stageGate.status],
-        label: "本機 Worker 版本不同步",
-        summary: "請重新下載並重啟背景 Worker，再重跑同一個 Agent。",
-      };
-    }
-
-    if (stageGate.recoveryKind === "worker_internal_error") {
-      return {
-        status: statusLabels[stageGate.status],
-        label: "Worker 內部錯誤",
-        summary:
-          "請更新/重啟 Worker 後重跑同一個 Agent；若仍同錯，需修復 App 提供的 worker bundle。",
-      };
-    }
-
-    if (stageGate.recoveryKind === "repo_dirty_blocked") {
-      return {
-        status: statusLabels[stageGate.status],
-        label: "本機 repo 狀態需處理",
-        summary: "正式 PR 流程需要乾淨工作區，請先處理未提交異動或分支衝突。",
-      };
-    }
-
-    return {
-      status: statusLabels[stageGate.status],
-      label: "流程已暫停",
-      summary: "需先處理阻擋原因，才會繼續自動派工。",
-    };
-  }
-
-  return {
-    status: statusLabels[stageGate.status],
-    label: stageGate.label === "Delivered" ? "已交付" : "狀態正常",
-    summary:
-      stageGate.label === "Delivered"
-        ? "Agent3 已完成審查，此需求已依不需要 PR 模式交付。"
-        : "目前沒有阻擋項目，App 會依工作流自動處理下一步。",
-  };
 }
 
 function formatStageGateListItem(item: string) {
