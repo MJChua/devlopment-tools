@@ -4,6 +4,8 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   ChevronsUpDown,
   Clipboard,
   GitPullRequest,
@@ -395,6 +397,7 @@ export function WorkflowControlPlane() {
   const [message, setMessage] = useState("");
   const [activeWorkspaceTab, setActiveWorkspaceTab] =
     useState<WorkspaceTab>("new");
+  const [requestListCollapsed, setRequestListCollapsed] = useState(true);
   const [selectedRequestStorageReady, setSelectedRequestStorageReady] =
     useState(false);
   const [recoveryNotesByRequest, setRecoveryNotesByRequest] = useState<
@@ -529,6 +532,11 @@ export function WorkflowControlPlane() {
       ),
     [currentOwner, requests, selectedRepoPath],
   );
+  const requestListIsCollapsed =
+    requestListCollapsed && Boolean(selectedRequest);
+  const visibleBlockedRequestCount = visibleRequests.filter(
+    (request) => request.status === "blocked",
+  ).length;
   const selectedRequestIsVisible = Boolean(
     selectedRequest &&
       visibleRequests.some(
@@ -2949,7 +2957,11 @@ export function WorkflowControlPlane() {
 
         {canUseWorkflow && activeWorkspaceTab === "process" ? (
         <section
-          className={`grid min-w-0 gap-4 rounded-md outline-none transition-shadow xl:grid-cols-[minmax(280px,380px)_minmax(0,1fr)] ${
+          className={`grid min-w-0 gap-4 rounded-md outline-none transition-shadow ${
+            requestListIsCollapsed
+              ? "xl:grid-cols-[minmax(220px,260px)_minmax(0,1fr)]"
+              : "xl:grid-cols-[minmax(280px,380px)_minmax(0,1fr)]"
+          } ${
             recentlySubmittedRequestId ? "ring-2 ring-blue-200 ring-offset-2" : ""
           }`}
           ref={progressPanelRef}
@@ -2959,43 +2971,71 @@ export function WorkflowControlPlane() {
             icon={<GitPullRequest className="h-4 w-4" />}
             title="我的需求紀錄"
           >
-            <div className="flex max-h-[520px] flex-col gap-2 overflow-auto">
-              {visibleRequests.length === 0 ? (
-                <EmptyState text="目前沒有你的需求紀錄。" />
-              ) : (
-                visibleRequests.map((request) => (
-                  <button
-                    className={`flex w-full min-w-0 flex-col rounded-md border p-3 text-left text-sm ${
-                      selectedRequestId === request.requestId
-                        ? "border-blue-500 bg-blue-50"
-                        : "border-slate-200 bg-white hover:border-slate-300"
-                    } ${
-                      recentlySubmittedRequestId === request.requestId
-                        ? "ring-2 ring-blue-300"
-                        : ""
-                    }`}
-                    key={request.requestId}
-                    onClick={() => setSelectedRequestId(request.requestId)}
-                    type="button"
-                  >
-                    <div className="min-w-0 break-words font-semibold text-slate-950">
-                      {formatRequestDisplayTitle(request)}
-                    </div>
-                    <div className="mt-1 break-all font-mono text-xs text-slate-500">
-                      {request.requestId}
-                    </div>
-                    <div className="mt-3 flex flex-wrap items-center gap-2">
-                      <span className="inline-flex min-h-7 min-w-[6.5rem] items-center justify-center rounded-md border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-700">
-                        {formatUiDeliveryMode(request.deliveryMode)}
-                      </span>
-                      <StageBadge
-                        className="ml-auto w-28 shrink-0 justify-center"
-                        stage={request.status}
-                      />
-                    </div>
-                  </button>
-                ))
-              )}
+            <div className="flex flex-col gap-3">
+              <Button
+                className="h-auto w-full justify-between gap-3 px-3 py-2 text-left"
+                onClick={() => setRequestListCollapsed((current) => !current)}
+                type="button"
+                variant="outline"
+              >
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold text-slate-950">
+                    {requestListIsCollapsed ? "展開需求紀錄" : "收合需求紀錄"}
+                  </span>
+                  <span className="mt-1 block truncate text-xs font-normal text-slate-500">
+                    {visibleRequests.length} 筆 · {visibleBlockedRequestCount} 個阻擋
+                    {selectedRequest
+                      ? ` · ${formatRequestDisplayTitle(selectedRequest)}`
+                      : ""}
+                  </span>
+                </span>
+                {requestListIsCollapsed ? (
+                  <ChevronRight className="h-4 w-4 shrink-0" />
+                ) : (
+                  <ChevronDown className="h-4 w-4 shrink-0" />
+                )}
+              </Button>
+
+              {!requestListIsCollapsed ? (
+                <div className="flex max-h-[520px] flex-col gap-2 overflow-auto">
+                  {visibleRequests.length === 0 ? (
+                    <EmptyState text="目前沒有你的需求紀錄。" />
+                  ) : (
+                    visibleRequests.map((request) => (
+                      <button
+                        className={`flex w-full min-w-0 flex-col rounded-md border p-3 text-left text-sm ${
+                          selectedRequestId === request.requestId
+                            ? "border-blue-500 bg-blue-50"
+                            : "border-slate-200 bg-white hover:border-slate-300"
+                        } ${
+                          recentlySubmittedRequestId === request.requestId
+                            ? "ring-2 ring-blue-300"
+                            : ""
+                        }`}
+                        key={request.requestId}
+                        onClick={() => setSelectedRequestId(request.requestId)}
+                        type="button"
+                      >
+                        <div className="min-w-0 break-words font-semibold text-slate-950">
+                          {formatRequestDisplayTitle(request)}
+                        </div>
+                        <div className="mt-1 break-all font-mono text-xs text-slate-500">
+                          {request.requestId}
+                        </div>
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <span className="inline-flex min-h-7 min-w-[6.5rem] items-center justify-center rounded-md border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-700">
+                            {formatUiDeliveryMode(request.deliveryMode)}
+                          </span>
+                          <StageBadge
+                            className="ml-auto w-28 shrink-0 justify-center"
+                            stage={request.status}
+                          />
+                        </div>
+                      </button>
+                    ))
+                  )}
+                </div>
+              ) : null}
             </div>
           </Panel>
 
