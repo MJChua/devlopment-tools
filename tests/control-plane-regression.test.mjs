@@ -304,6 +304,26 @@ test("request intake text does not ask users to repeat selected Azure numbers", 
   );
 });
 
+test("User Story Azure number candidates are visible but not selectable", () => {
+  const source = readFileSync(
+    new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    source,
+    /item\?\.type\?\.trim\(\)\.toLowerCase\(\) === "user story"/,
+  );
+  assert.match(source, /selectedWorkItem\?\.id === requestForm\.azureWorkItemId/);
+  assert.match(source, /!isUserStoryCandidate\(selectedWorkItem\)/);
+  assert.match(source, /aria-disabled=\{isUserStory \|\| undefined\}/);
+  assert.match(source, /cursor-not-allowed bg-amber-100 text-amber-950/);
+  assert.match(source, /tabIndex=\{isUserStory \? undefined : 0\}/);
+  assert.match(source, /if \(!isUserStory\) \{\s+onSelect\(selected \? "" : item\.id\);/);
+  assert.match(source, /User Story 只作需求來源參考，請選 Bug \/ Feature \/ Task 等開發單號。/);
+  assert.match(source, /border-amber-500 bg-amber-200 text-amber-950/);
+});
+
 test("blocker recovery exposes one rerun Agent action", () => {
   const source = readFileSync(
     new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),

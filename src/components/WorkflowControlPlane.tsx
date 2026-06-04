@@ -1702,7 +1702,8 @@ export function WorkflowControlPlane() {
         deliveryMode === "draft_pr" &&
         workerForm.autoCommitAndPr &&
         hasAzureWorkItemAccess &&
-        requestForm.azureWorkItemId;
+        selectedWorkItem?.id === requestForm.azureWorkItemId &&
+        !isUserStoryCandidate(selectedWorkItem);
       const azureReference = canUseSelectedWorkItem
         ? { type: "work-item" as AzureReferenceType, id: requestForm.azureWorkItemId }
         : extractAzureReferenceFromDetail(requestForm.detail);
@@ -4903,7 +4904,11 @@ function AzureNumberIntake({
         </Alert>
       ) : null}
 
-      {selectedItem ? (
+      {selectedItem && isUserStoryCandidate(selectedItem) ? (
+        <div className="rounded-md border border-amber-300 bg-amber-100 px-3 py-2 text-sm leading-6 text-amber-950">
+          User Story 只作需求來源參考，請改選 Bug / Feature / Task 等開發單號。
+        </div>
+      ) : selectedItem ? (
         <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-950">
           已讀取 Azure 單號內容：{formatAzureNumberLabel(selectedItem)}。此單號會用於
           PR 分支與 Azure 追蹤，不需要在需求內容重複填寫。
@@ -5025,20 +5030,32 @@ function WorkItemCandidateTable({
         <TableBody>
           {candidates.map((item) => {
             const selected = item.id === selectedId;
+            const isUserStory = isUserStoryCandidate(item);
             return (
               <TableRow
+                aria-disabled={isUserStory || undefined}
                 aria-selected={selected}
-                className="cursor-pointer"
+                className={
+                  isUserStory
+                    ? "cursor-not-allowed bg-amber-100 text-amber-950 hover:bg-amber-100"
+                    : "cursor-pointer"
+                }
                 data-state={selected ? "selected" : undefined}
                 key={item.id}
-                onClick={() => onSelect(selected ? "" : item.id)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
+                onClick={() => {
+                  if (!isUserStory) {
                     onSelect(selected ? "" : item.id);
                   }
                 }}
-                tabIndex={0}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    if (!isUserStory) {
+                      onSelect(selected ? "" : item.id);
+                    }
+                  }
+                }}
+                tabIndex={isUserStory ? undefined : 0}
               >
                 <TableCell className="font-mono text-xs">
                   <span className="inline-flex items-center gap-1">
@@ -5053,12 +5070,26 @@ function WorkItemCandidateTable({
                   <div className="mt-1 truncate text-xs text-slate-500">
                     {item.iterationPath || selectedIteration?.path || "全專案"}
                   </div>
+                  {isUserStory ? (
+                    <div className="mt-1 text-xs font-medium text-amber-900">
+                      User Story 只作需求來源參考，請選 Bug / Feature / Task 等開發單號。
+                    </div>
+                  ) : null}
                 </TableCell>
                 <TableCell>
                   <Badge variant="secondary">{item.state || "未設定"}</Badge>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline">{item.type || "Azure"}</Badge>
+                  <Badge
+                    className={
+                      isUserStory
+                        ? "border-amber-500 bg-amber-200 text-amber-950"
+                        : undefined
+                    }
+                    variant="outline"
+                  >
+                    {item.type || "Azure"}
+                  </Badge>
                 </TableCell>
                 <TableCell className="max-w-40 truncate text-sm text-slate-600">
                   {item.assignedTo || "未指派"}
@@ -6723,6 +6754,10 @@ function formatAzureNumberLabel(item: WorkItemCandidate) {
   const state = item.state ? ` (${item.state})` : "";
 
   return `${type} 單號 ${item.id}${title}${state}`;
+}
+
+function isUserStoryCandidate(item: WorkItemCandidate | null | undefined) {
+  return item?.type?.trim().toLowerCase() === "user story";
 }
 
 function buildVerifiedWorkItemEvidence(
