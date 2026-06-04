@@ -12,6 +12,7 @@ import {
   applyWorkerManifestToProfile,
   buildCorsHeaders,
   buildControlPlaneAzureRequestBody,
+  buildLauncherWorkerStatus,
   buildWorkerEnvironment,
   clearLauncherProfilePat,
   deleteLauncherProfile,
@@ -33,6 +34,8 @@ import {
 const workerFiles = ["local-worker.mjs", "local-worker-utils.mjs"];
 const paths = getLauncherPaths();
 const workerProcesses = new Map();
+const workerRestartsInFlight = new Set();
+const workerSupervisorIntervalMs = 15000;
 
 async function main() {
   await ensureLauncherDirectories(paths);
@@ -41,6 +44,7 @@ async function main() {
   );
 
   await startSavedProfiles();
+  startWorkerSupervisor();
 
   const server = http.createServer((request, response) => {
     void handleRequest(request, response).catch((error) => {
@@ -315,6 +319,65 @@ async function startSavedProfiles() {
   }
 }
 
+function startWorkerSupervisor() {
+  const timer = setInterval(() => {
+    void superviseSavedProfiles().catch((error) => {
+      void appendLauncherLog(`worker supervisor failed: ${formatError(error)}`);
+    });
+  }, workerSupervisorIntervalMs);
+  timer.unref?.();
+}
+
+async function superviseSavedProfiles() {
+  const profiles = await listLauncherProfiles(paths);
+  for (const profile of profiles) {
+    const pid = Number(profile.workerPid || workerProcesses.get(profile.workerId) || 0);
+    if (pid && isPidRunning(pid)) {
+      workerProcesses.set(profile.workerId, pid);
+      continue;
+    }
+
+    if (workerRestartsInFlight.has(profile.workerId)) {
+      continue;
+    }
+
+    workerRestartsInFlight.add(profile.workerId);
+    try {
+      await appendLauncherLog(
+        `worker supervisor restarting ${profile.workerId}; previous pid=${pid || "none"} is not running`,
+      );
+      const currentProfile = await loadLauncherProfile(paths, profile.workerId).catch(
+        () => null,
+      );
+      if (!currentProfile) {
+        await appendLauncherLog(
+          `worker supervisor skipped ${profile.workerId}; profile was removed`,
+        );
+        continue;
+      }
+
+      const manifest = await downloadWorkerFiles(currentProfile.controlPlaneUrl);
+      const readyProfile = applyWorkerManifestToProfile(currentProfile, manifest);
+      const started = await startWorkerProcess(readyProfile);
+      const updatedProfile = {
+        ...readyProfile,
+        workerPid: started.pid,
+        updatedAt: new Date().toISOString(),
+      };
+      await saveLauncherProfile(paths, updatedProfile);
+      await appendLauncherLog(
+        `worker supervisor restarted ${updatedProfile.workerId} pid=${updatedProfile.workerPid}`,
+      );
+    } catch (error) {
+      await appendLauncherLog(
+        `worker supervisor restart failed for ${profile.workerId}: ${formatError(error)}`,
+      );
+    } finally {
+      workerRestartsInFlight.delete(profile.workerId);
+    }
+  }
+}
+
 async function startWorkerProcess(profile) {
   await stopKnownProcess(profile.workerId, profile.workerPid);
   await ensureLauncherDirectories(paths);
@@ -446,17 +509,11 @@ async function getStatus(workerId) {
   if (workerId) {
     const profile = await loadLauncherProfile(paths, workerId).catch(() => null);
     const pid = Number(profile?.workerPid || workerProcesses.get(workerId) || 0);
-      return {
-        ok: true,
-        workerId,
-        hasProfile: Boolean(profile),
-        hasAzurePat: Boolean(profile?.azurePat),
-        running: Boolean(pid && isPidRunning(pid)),
-        pid: pid || null,
-        workerVersion: profile?.workerVersion || "",
-        workerScriptHash: profile?.workerScriptHash || "",
-        workerUpdatedAt: profile?.workerUpdatedAt || "",
-      };
+    return {
+      ok: true,
+      workerId,
+      ...buildLauncherWorkerStatus(profile, Boolean(pid && isPidRunning(pid))),
+    };
   }
 
   const profiles = await listLauncherProfiles(paths);
@@ -464,9 +521,10 @@ async function getStatus(workerId) {
     ok: true,
     profiles: profiles.map((profile) => {
       const redacted = redactProfile(profile);
+      const pid = Number(redacted.workerPid || workerProcesses.get(profile.workerId) || 0);
       return {
         ...redacted,
-        running: Boolean(redacted.workerPid && isPidRunning(redacted.workerPid)),
+        ...buildLauncherWorkerStatus(profile, Boolean(pid && isPidRunning(pid))),
       };
     }),
   };

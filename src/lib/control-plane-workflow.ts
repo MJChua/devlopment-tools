@@ -88,6 +88,7 @@ export type StageGateRecoveryKind =
   | "worker_runtime_error"
   | "worker_internal_error"
   | "worker_version_mismatch"
+  | "worker_offline"
   | "repo_dirty_blocked"
   | "pr_branch_outdated"
   | "stale_run"
@@ -334,6 +335,7 @@ export type StageGateResult = {
 };
 
 export const RUN_HEARTBEAT_STALE_MS = 10 * 60 * 1000;
+export const RUN_PICKUP_STALE_MS = 2 * 60 * 1000;
 export const RUN_SOFT_TIMEOUT_MS = 5 * 60 * 1000;
 export const PACKET_SIZE_WARNING_CHARS = 24_000;
 
@@ -1976,6 +1978,18 @@ export function isRunHeartbeatStale(
   );
 }
 
+export function isRunPickupStale(
+  run: Pick<WorkerRun, "status" | "createdAt" | "startedAt">,
+  now = Date.now(),
+) {
+  if (run.status !== "queued" || run.startedAt) {
+    return false;
+  }
+
+  const createdAt = Date.parse(run.createdAt);
+  return Number.isFinite(createdAt) && now - createdAt > RUN_PICKUP_STALE_MS;
+}
+
 export function getEffectiveBlockingRun(runs: WorkerRun[]) {
   const supersededRunIds = new Set(
     runs
@@ -2031,23 +2045,41 @@ export function evaluateWorkflowStageGate(
   }
 
   if (openRun) {
-    const stale = isRunHeartbeatStale(openRun);
+    const pickupStale = isRunPickupStale(openRun);
+    const heartbeatStale =
+      openRun.status === "running" && isRunHeartbeatStale(openRun);
     return stageGateResult({
       status: "waiting",
-      label: stale ? "Run may be stuck" : "Worker running",
-      summary: stale
-        ? `${formatAgentRole(openRun.agentRole)} is ${openRun.status}, but its run heartbeat is stale.`
-        : `${formatAgentRole(openRun.agentRole)} is ${openRun.status}.`,
+      label: pickupStale
+        ? "Worker has not picked up the run"
+        : heartbeatStale
+          ? "Run may be stuck"
+          : openRun.status === "queued"
+            ? "Waiting for worker pickup"
+            : "Worker running",
+      summary: pickupStale
+        ? `${formatAgentRole(openRun.agentRole)} is still queued and has not been picked up by the Local Worker.`
+        : heartbeatStale
+          ? `${formatAgentRole(openRun.agentRole)} is running, but its run heartbeat is stale.`
+          : `${formatAgentRole(openRun.agentRole)} is ${openRun.status}.`,
       blockers,
       nextActions: [
-        stale
-          ? "Synchronize worker status before retrying this Agent."
-          : "Wait for the assigned Local Worker to return artifacts.",
+        pickupStale
+          ? "Restart or refresh the assigned Local Worker so it can pick up the queued Agent run."
+          : heartbeatStale
+            ? "Synchronize worker status before retrying this Agent."
+            : openRun.status === "queued"
+              ? "Wait for the assigned Local Worker to pick up the queued Agent run."
+              : "Wait for the assigned Local Worker to return artifacts.",
       ],
       humanDecisions,
-      blockedRunId: stale ? openRun.runId : "",
-      blockedAgentRole: stale ? openRun.agentRole : null,
-      recoveryKind: stale ? "stale_run" : "none",
+      blockedRunId: pickupStale || heartbeatStale ? openRun.runId : "",
+      blockedAgentRole: pickupStale || heartbeatStale ? openRun.agentRole : null,
+      recoveryKind: pickupStale
+        ? "worker_offline"
+        : heartbeatStale
+          ? "stale_run"
+          : "none",
     });
   }
 

@@ -725,6 +725,30 @@ test("workflow stage gate marks stale running run without enabling duplicate dis
   assert.equal(stageGate.canManualRetry, false);
 });
 
+test("workflow stage gate separates queued worker pickup delay from running stale runs", () => {
+  const queuedRun = sampleRun({
+    runId: "agent0-queued-offline",
+    agentRole: "agent0",
+    status: "queued",
+    createdAt: "2026-05-25T06:00:00.000Z",
+    startedAt: null,
+    updatedAt: "2026-05-25T06:00:00.000Z",
+  });
+  const stageGate = evaluateWorkflowStageGate({
+    request: sampleRequest({ status: "dispatched" }),
+    runs: [queuedRun],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(stageGate.status, "waiting");
+  assert.equal(stageGate.recoveryKind, "worker_offline");
+  assert.equal(stageGate.blockedRunId, queuedRun.runId);
+  assert.equal(stageGate.blockedAgentRole, "agent0");
+  assert.match(stageGate.summary, /has not been picked up/);
+  assert.match(stageGate.nextActions[0], /Restart or refresh/);
+});
+
 test("workflow stage gate separates worker runtime errors from Agent blockers", () => {
   const blockedRun = sampleRun({
     runId: "agent0-worker-runtime",

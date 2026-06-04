@@ -143,6 +143,8 @@ type LocalLauncherState = {
   checked: boolean;
   available: boolean;
   version: string;
+  expectedLauncherVersion: string;
+  launcherVersionStatus: "current" | "mismatch" | "unknown";
   installMode: "scheduled-task" | "temporary-startup-folder" | "unknown";
   scheduledTaskStatus: "installed" | "access-denied" | "failed" | "unknown";
   requiresAdminInstall: boolean;
@@ -150,6 +152,13 @@ type LocalLauncherState = {
   hasProfile: boolean;
   hasAzurePat: boolean;
   running: boolean;
+  pid: number | null;
+  workerStatusReason:
+    | "running"
+    | "pid_not_running"
+    | "pid_missing"
+    | "profile_missing"
+    | "";
   workerVersion: string;
   workerScriptHash: string;
   workerUpdatedAt: string;
@@ -166,6 +175,13 @@ type LocalLauncherHealth = {
   scheduledTaskError?: string;
 };
 
+type WorkerBootstrapManifestView = {
+  workerVersion: string;
+  launcherVersion?: string;
+  files: Array<{ name: string; sha256: string; bytes: number }>;
+  launcherFiles?: Array<{ name: string; sha256: string; bytes: number }>;
+};
+
 type LocalLauncherWorkerStatus = {
   ok: boolean;
   workerId: string;
@@ -173,6 +189,11 @@ type LocalLauncherWorkerStatus = {
   hasAzurePat: boolean;
   running: boolean;
   pid: number | null;
+  workerStatusReason?:
+    | "running"
+    | "pid_not_running"
+    | "pid_missing"
+    | "profile_missing";
   workerVersion?: string;
   workerScriptHash?: string;
   workerUpdatedAt?: string;
@@ -302,6 +323,8 @@ const DEFAULT_LOCAL_LAUNCHER_STATE: LocalLauncherState = {
   checked: false,
   available: false,
   version: "",
+  expectedLauncherVersion: "",
+  launcherVersionStatus: "unknown",
   installMode: "unknown",
   scheduledTaskStatus: "unknown",
   requiresAdminInstall: false,
@@ -309,6 +332,8 @@ const DEFAULT_LOCAL_LAUNCHER_STATE: LocalLauncherState = {
   hasProfile: false,
   hasAzurePat: false,
   running: false,
+  pid: null,
+  workerStatusReason: "",
   workerVersion: "",
   workerScriptHash: "",
   workerUpdatedAt: "",
@@ -451,6 +476,8 @@ export function WorkflowControlPlane() {
   const canUseWorkflow = connectionInfo.ready && Boolean(selectedRepoPath);
   const setupDialogOpen = !canUseWorkflow || setupDialogRequested;
   const launcherStatusText = formatLauncherStatus(launcherState);
+  const launcherVersionMismatch =
+    launcherState.launcherVersionStatus === "mismatch";
   const workerHasRecentHeartbeat = Boolean(
     currentWorker?.lastSeenAt && !isStaleTimestamp(currentWorker.lastSeenAt),
   );
@@ -529,7 +556,9 @@ export function WorkflowControlPlane() {
     [selectedRequest, selectedRequestNeedsAttention, visibleRequests],
   );
   const hasLauncherSecondaryControls = Boolean(
-    lastRegisteredWorker || workerHasActiveRequest || currentWorker,
+    lastRegisteredWorker ||
+      workerHasActiveRequest ||
+      (currentWorker && !launcherVersionMismatch),
   );
   const selectedWorker = useMemo(
     () =>
@@ -929,7 +958,12 @@ export function WorkflowControlPlane() {
     }
 
     try {
-      const health = await fetchLauncherJson<LocalLauncherHealth>("/health");
+      const [health, manifest] = await Promise.all([
+        fetchLauncherJson<LocalLauncherHealth>("/health"),
+        fetchJson<WorkerBootstrapManifestView>(
+          "/api/workers/bootstrap?file=worker-manifest.json",
+        ).catch(() => null),
+      ]);
       const workerId =
         currentWorker?.workerId ||
         requestForm.assignedWorkerId ||
@@ -942,10 +976,19 @@ export function WorkflowControlPlane() {
         ).catch(() => null);
       }
 
+      const workerStatusReason =
+        workerStatus?.workerStatusReason ||
+        inferWorkerStatusReason(workerStatus);
+      const expectedLauncherVersion = manifest?.launcherVersion || "";
       setLauncherState({
         checked: true,
         available: true,
         version: health.version || "",
+        expectedLauncherVersion,
+        launcherVersionStatus: getLauncherVersionStatus(
+          health.version || "",
+          expectedLauncherVersion,
+        ),
         installMode: health.installMode || "unknown",
         scheduledTaskStatus: health.scheduledTaskStatus || "unknown",
         requiresAdminInstall: health.requiresAdminInstall === true,
@@ -953,6 +996,8 @@ export function WorkflowControlPlane() {
         hasProfile: Boolean(workerStatus?.hasProfile),
         hasAzurePat: Boolean(workerStatus?.hasAzurePat),
         running: Boolean(workerStatus?.running),
+        pid: workerStatus?.pid ?? null,
+        workerStatusReason,
         workerVersion: workerStatus?.workerVersion || "",
         workerScriptHash: workerStatus?.workerScriptHash || "",
         workerUpdatedAt: workerStatus?.workerUpdatedAt || "",
@@ -1746,7 +1791,11 @@ export function WorkflowControlPlane() {
     if (copyResult === "copied" || copyResult === "selected") {
       setLauncherActionState("success");
       setState("success");
-      setMessage("已複製安裝指令，請在 PowerShell 執行一次後回到 App。");
+      setMessage(
+        launcherVersionMismatch
+          ? "已複製更新指令，請在 PowerShell 執行一次後回到 App。"
+          : "已複製管理員安裝指令，請貼到以系統管理員身分開啟的 PowerShell，完成後回到 App 重新檢查。",
+      );
       return;
     }
 
@@ -2290,7 +2339,11 @@ export function WorkflowControlPlane() {
         return;
       }
       setState("success");
-      setMessage("本機 Worker 已重新下載並重啟。可重跑同一個 Agent。");
+      setMessage(
+        options.retrySameAgent
+          ? "本機 Worker 已重新下載並重啟。可重跑同一個 Agent。"
+          : "本機 Worker 已重新下載並重啟，會領取既有 queued run。",
+      );
     } catch (error) {
       setWorkerRefreshState("error");
       setState("error");
@@ -2521,21 +2574,87 @@ export function WorkflowControlPlane() {
                     </div>
                   </div>
                 }
-                step="3"
-                title="產生並啟動 worker"
-              >
-                {launcherState.available && launcherState.requiresAdminInstall ? (
-                  <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-900">
-                    <div className="font-semibold">Launcher 目前是暫時啟動模式</div>
-                    <p className="mt-1">
-                      目前 worker 可以使用，但 Scheduled Task 尚未正式安裝；重開機或重新登入後穩定性取決於 Startup
-                      folder。請用管理員 PowerShell 重新執行安裝指令，完成正式 Scheduled Task 安裝。
+              step="3"
+              title="產生並啟動 worker"
+            >
+                {launcherState.available && launcherVersionMismatch ? (
+                  <div className="mb-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+                    <div className="font-semibold">Launcher 需要更新</div>
+                    <ul className="mt-2 list-disc space-y-1 pl-5">
+                      <li>目前 Launcher 是舊版，無法正確回報 worker 狀態。</li>
+                      <li>先更新 Launcher，再重啟 Worker。</li>
+                      <li>更新不會重建需求，也不會建立新的 Agent run。</li>
+                    </ul>
+                    <button
+                      className="mt-3 inline-flex items-center justify-center gap-2 rounded-md border border-red-300 bg-white px-3 py-2 text-sm font-semibold text-red-800 disabled:cursor-not-allowed disabled:bg-red-100 disabled:text-red-400"
+                      disabled={launcherActionState === "loading"}
+                      onClick={installLocalLauncher}
+                      type="button"
+                    >
+                      <Clipboard className="h-4 w-4" />
+                      複製更新指令
+                    </button>
+                    <details className="mt-2 text-xs text-red-800">
+                      <summary className="cursor-pointer font-semibold">
+                        查看詳情
+                      </summary>
+                      <div className="mt-1 space-y-1 break-all">
+                        <div>目前版本：{launcherState.version || "未知"}</div>
+                        <div>
+                          App 期望：{launcherState.expectedLauncherVersion || "未知"}
+                        </div>
+                      </div>
+                    </details>
+                  </div>
+                ) : null}
+                {launcherState.available &&
+                launcherState.requiresAdminInstall &&
+                !launcherVersionMismatch ? (
+                  <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                    <div className="font-semibold">Launcher 暫時模式</div>
+                    <ul className="mt-2 list-disc space-y-1 pl-5">
+                      <li>Launcher 已是目前版本，但正式常駐安裝尚未完成。</li>
+                      <li>目前透過 Startup folder 暫時啟動，可繼續使用。</li>
+                      <li>重開機後可能不會自動啟動。</li>
+                      <li>請貼到以系統管理員身分開啟的 PowerShell，建立 Windows Scheduled Task。</li>
+                    </ul>
+                    <button
+                      className="mt-3 inline-flex items-center justify-center gap-2 rounded-md border border-amber-300 bg-white px-3 py-2 text-sm font-semibold text-amber-900 disabled:cursor-not-allowed disabled:bg-amber-100 disabled:text-amber-500"
+                      disabled={launcherActionState === "loading"}
+                      onClick={installLocalLauncher}
+                      type="button"
+                    >
+                      <Clipboard className="h-4 w-4" />
+                      複製管理員安裝指令
+                    </button>
+                    <p className="mt-2 text-xs font-medium text-amber-800">
+                      完成後重新檢查，/health 應回報 installMode=scheduled-task、requiresAdminInstall=false、scheduledTaskStatus=installed。
                     </p>
-                    {launcherState.scheduledTaskError ? (
-                      <p className="mt-1 break-all text-xs text-amber-800">
-                        Scheduled Task 錯誤：{launcherState.scheduledTaskError}
-                      </p>
-                    ) : null}
+                    <details className="mt-2 text-xs text-amber-800">
+                      <summary className="cursor-pointer font-semibold">
+                        查看詳情
+                      </summary>
+                      <div className="mt-1 space-y-1 break-all">
+                        <div>目前版本：{launcherState.version || "未知"}</div>
+                        <div>
+                          App 期望：{launcherState.expectedLauncherVersion || "未知"}
+                        </div>
+                        <div>安裝模式：{launcherState.installMode}</div>
+                        <div>
+                          Scheduled Task 狀態：{launcherState.scheduledTaskStatus}
+                        </div>
+                        <div>
+                          Startup folder fallback：
+                          {launcherState.installMode === "temporary-startup-folder"
+                            ? "已偵測"
+                            : "未偵測"}
+                        </div>
+                        <div>
+                          Scheduled Task 錯誤：
+                          {launcherState.scheduledTaskError || "未回報"}
+                        </div>
+                      </div>
+                    </details>
                   </div>
                 ) : null}
                 {hasLauncherSecondaryControls ? (
@@ -2555,7 +2674,10 @@ export function WorkflowControlPlane() {
                               : "複製指令"}
                         </button>
                       ) : null}
-                      {currentWorker && launcherState.available && launcherState.hasProfile ? (
+                      {currentWorker &&
+                      launcherState.available &&
+                      launcherState.hasProfile &&
+                      !launcherVersionMismatch ? (
                         <button
                           className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
                           disabled={workerRefreshState === "loading"}
@@ -2567,7 +2689,7 @@ export function WorkflowControlPlane() {
                           ) : (
                             <RefreshCw className="h-4 w-4" />
                           )}
-                          重新下載並重啟 Worker
+                          重啟 Worker
                         </button>
                       ) : null}
                     </div>
@@ -2927,6 +3049,7 @@ export function WorkflowControlPlane() {
                 </div>
 
                 <WorkflowStatusDashboard
+                  launcherState={launcherState}
                   latestRun={latestRun}
                   openRun={openRun}
                   request={selectedRequest}
@@ -2947,7 +3070,10 @@ export function WorkflowControlPlane() {
                     onOpenQuickClarification={openQuickClarificationDialog}
                     onPasteAttachment={handleRecoveryNotePaste}
                     onRefreshWorker={() =>
-                      refreshLocalWorkerCache({ retrySameAgent: true })
+                      refreshLocalWorkerCache({
+                        retrySameAgent:
+                          stageGate.recoveryKind !== "worker_offline",
+                      })
                     }
                     onRemoveAttachment={removeRecoveryAttachment}
                     onSelectAttachmentFiles={handleRecoveryAttachmentFileChange}
@@ -3856,7 +3982,10 @@ function BlockerRecoveryPanel({
 
   const blockedRun =
     runs.find((run) => run.runId === stageGate.blockedRunId) ??
-    (stageGate.recoveryKind === "stale_run" ? openRun : null) ??
+    (stageGate.recoveryKind === "stale_run" ||
+    stageGate.recoveryKind === "worker_offline"
+      ? openRun
+      : null) ??
     latestRun;
   const hasOpenRun = Boolean(openRun);
   const canManualRetry =
@@ -3874,6 +4003,7 @@ function BlockerRecoveryPanel({
     worker?.lastSeenAt && isStaleTimestamp(worker.lastSeenAt),
   );
   const workerInternalError = stageGate.recoveryKind === "worker_internal_error";
+  const workerOffline = stageGate.recoveryKind === "worker_offline";
   const workerVersionMismatch =
     stageGate.recoveryKind === "worker_version_mismatch" ||
     stageGate.recoveryKind === "worker_runtime_error";
@@ -3928,13 +4058,14 @@ function BlockerRecoveryPanel({
 
       <BlockerSummaryList items={stageGate.blockers} />
 
-      {workerVersionMismatch && launcherHasProfile ? (
+      {workerOffline && launcherHasProfile ? (
         <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-900">
-          <div className="font-semibold">本機 Worker 版本不同步</div>
-          <p className="mt-1">
-            App 會重新下載 worker 腳本、重啟背景 worker，並重跑同一個
-            Agent，不需要重新輸入需求。
-          </p>
+          <div className="font-semibold">Worker 已停止，Agent 尚未開始</div>
+          <ul className="mt-2 list-disc space-y-1 pl-5">
+            <li>目前 run 還在 queued。</li>
+            <li>重啟 Worker 後會接續同一筆 run。</li>
+            <li>不需要重新輸入需求。</li>
+          </ul>
           <Button
             className="mt-3 gap-2"
             disabled={loading || workerRefreshing}
@@ -3947,7 +4078,32 @@ function BlockerRecoveryPanel({
             ) : (
               <RefreshCw className="h-4 w-4" />
             )}
-            重新下載並重啟 Worker
+            重啟 Worker
+          </Button>
+        </div>
+      ) : null}
+
+      {workerVersionMismatch && launcherHasProfile ? (
+        <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-900">
+          <div className="font-semibold">Worker 版本不同步</div>
+          <ul className="mt-2 list-disc space-y-1 pl-5">
+            <li>Worker 腳本需要重新下載。</li>
+            <li>更新後會重跑同一個 Agent。</li>
+            <li>不需要重新輸入需求。</li>
+          </ul>
+          <Button
+            className="mt-3 gap-2"
+            disabled={loading || workerRefreshing}
+            onClick={onRefreshWorker}
+            type="button"
+            variant="outline"
+          >
+            {workerRefreshing ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4" />
+            )}
+            更新並重啟 Worker
           </Button>
         </div>
       ) : null}
@@ -5150,11 +5306,13 @@ function BackgroundJobBanner({
 }
 
 function WorkflowStatusDashboard({
+  launcherState,
   latestRun,
   openRun,
   request,
   worker,
 }: {
+  launcherState: LocalLauncherState;
   latestRun: WorkerRunView | null;
   openRun: WorkerRunView | null;
   request: WorkflowRequest;
@@ -5162,12 +5320,33 @@ function WorkflowStatusDashboard({
 }) {
   const activeRun = openRun ?? latestRun;
   const isRunning = Boolean(openRun);
+  const isQueuedRun = openRun?.status === "queued";
+  const launcherNeedsUpdate = launcherState.launcherVersionStatus === "mismatch";
+  const workerProcessStopped = Boolean(
+    openRun &&
+      launcherState.available &&
+      launcherState.hasProfile &&
+      !launcherState.running,
+  );
   const statusText = openRun
     ? `${formatUiAgentRole(openRun.agentRole)} / ${formatWorkerRunStatus(openRun.status)}`
     : formatUiWorkflowStage(request.status);
-  const progressLabel = openRun?.progressLabel?.trim() ?? "";
-  const progressDetail = openRun?.progressDetail?.trim() ?? "";
+  const progressLabel = launcherNeedsUpdate
+    ? "Launcher 需要更新"
+    : workerProcessStopped
+      ? "Worker 已停止"
+      : isQueuedRun
+      ? "等待 Worker 領取 Agent"
+      : (openRun?.progressLabel?.trim() ?? "");
+  const progressDetail = launcherNeedsUpdate
+    ? "先更新 Launcher，再重啟 Worker。"
+    : workerProcessStopped
+      ? "Agent 尚未開始；重啟 Worker 後會接續這筆 queued run。"
+      : isQueuedRun
+      ? "Agent run 已排入佇列，但尚未被本機 Worker 領取。"
+      : (openRun?.progressDetail?.trim() ?? "");
   const isPastSoftTimeout = openRun ? isRunPastSoftTimeout(openRun) : false;
+  const runtimeLabel = isQueuedRun ? "等待 Worker 時間" : "執行時間";
   const isPacketLarge = Boolean(
     openRun && openRun.packetSizeChars > PACKET_SIZE_WARNING_CHARS,
   );
@@ -5224,6 +5403,20 @@ function WorkflowStatusDashboard({
           ) : null}
           {openRun ? (
             <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              <MiniBadge label="Run" value={formatWorkerRunStatus(openRun.status)} />
+              <MiniBadge label={runtimeLabel} value={formatRunDuration(openRun)} />
+              <MiniBadge
+                label="Launcher"
+                value={
+                  launcherState.available
+                    ? launcherState.running
+                      ? "執行中"
+                      : launcherNeedsUpdate
+                        ? "需更新"
+                        : "已停止"
+                    : "未啟動"
+                }
+              />
               <MiniBadge label="Packet" value={formatPacketSize(openRun.packetSizeChars)} />
               <MiniBadge
                 label="Handoff"
@@ -5238,6 +5431,25 @@ function WorkflowStatusDashboard({
                 value={openRun.isRetryContext ? "是" : "否"}
               />
             </div>
+          ) : null}
+          {workerProcessStopped || launcherNeedsUpdate ? (
+            <details className="mt-2 text-xs text-slate-500">
+              <summary className="cursor-pointer font-semibold text-slate-600">
+                查看詳情
+              </summary>
+              <div className="mt-1 space-y-1 break-all">
+                <div>Launcher 版本：{launcherState.version || "未知"}</div>
+                <div>
+                  App 期望 Launcher：
+                  {launcherState.expectedLauncherVersion || "未知"}
+                </div>
+                <div>Worker PID：{launcherState.pid ?? "無"}</div>
+                <div>
+                  Worker 狀態：
+                  {launcherState.workerStatusReason || "未回報"}
+                </div>
+              </div>
+            </details>
           ) : null}
           {isPacketLarge ? (
             <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-900">
@@ -5830,7 +6042,7 @@ function getWorkerConnectionInfo(
     return {
       ready: false,
       label: "連線逾時",
-      detail: "本機 worker 太久沒有回報。請重新啟動連線。",
+      detail: "Worker 太久沒有回報。",
       diagnosticCode: worker.codexDiagnosticCode,
       executablePath: worker.codexExecutablePath,
     };
@@ -5862,10 +6074,8 @@ function getWorkerConnectionInfo(
   if (worker.workerVersionStatus === "mismatch") {
     return {
       ready: true,
-      label: "Worker 版本不同步",
-      detail: worker.workerVersion
-        ? `目前 worker 版本 ${worker.workerVersion}，App 期望 ${worker.workerExpectedVersion}。請重新下載並重啟 Worker。`
-        : "目前 worker 沒有回報版本資訊，請重新下載並重啟 Worker。",
+      label: "Worker 需要更新",
+      detail: "Worker 腳本需要更新；請重啟 Worker。",
       diagnosticCode: worker.codexDiagnosticCode,
       executablePath: worker.codexExecutablePath,
     };
@@ -5875,7 +6085,7 @@ function getWorkerConnectionInfo(
     return {
       ready: true,
       label: "Worker 版本未確認",
-      detail: "目前 worker 尚未回報版本與腳本 hash；可繼續查看流程，但建議重新下載並重啟 Worker。",
+      detail: "Worker 尚未回報版本；建議重啟 Worker。",
       diagnosticCode: worker.codexDiagnosticCode,
       executablePath: worker.codexExecutablePath,
     };
@@ -6196,27 +6406,32 @@ function formatLauncherStatus(launcherState: LocalLauncherState) {
     return "尚未偵測到本機 Launcher。";
   }
 
+  if (launcherState.launcherVersionStatus === "mismatch") {
+    return "Launcher 需要更新。";
+  }
+
   const installSuffix = launcherState.requiresAdminInstall
-    ? "（暫時 Startup folder 啟動，需管理員 PowerShell 完成 Scheduled Task 安裝）"
+    ? "（暫時模式）"
     : launcherState.installMode === "scheduled-task"
-      ? "（Scheduled Task 已安裝）"
+      ? "（正式安裝）"
       : "";
 
   if (launcherState.running) {
-    return `本機 Launcher 已啟動，背景 worker 執行中。${installSuffix}`;
+    return `Worker 執行中。${installSuffix}`;
   }
 
   if (launcherState.hasProfile) {
-    return `本機 Launcher 已啟動，正在等待背景 worker 回報。${installSuffix}`;
+    return `等待 Worker 回報。${installSuffix}`;
   }
 
-  return `本機 Launcher 已啟動，尚未連線 worker。${installSuffix}`;
+  return `尚未連線 Worker。${installSuffix}`;
 }
 
 function shouldShowBlockerRecoveryPanel(stageGate: StageGateResult) {
   return (
     stageGate.status === "blocked" ||
     stageGate.status === "human-decision" ||
+    stageGate.recoveryKind === "worker_offline" ||
     stageGate.recoveryKind === "stale_run" ||
     stageGate.canManualRetry ||
     stageGate.needsClarification
@@ -6224,6 +6439,10 @@ function shouldShowBlockerRecoveryPanel(stageGate: StageGateResult) {
 }
 
 function formatRecoveryPanelSummary(stageGate: StageGateResult) {
+  if (stageGate.recoveryKind === "worker_offline") {
+    return "Worker 已停止，Agent 尚未開始。";
+  }
+
   if (stageGate.recoveryKind === "stale_run") {
     return "Run 可能卡住。";
   }
@@ -6259,6 +6478,10 @@ function formatRecoveryPanelSummary(stageGate: StageGateResult) {
 }
 
 function formatRecoveryNextStep(stageGate: StageGateResult) {
+  if (stageGate.recoveryKind === "worker_offline") {
+    return "重啟 Worker";
+  }
+
   if (stageGate.recoveryKind === "stale_run") {
     return "同步 / 等待";
   }
@@ -6302,6 +6525,15 @@ function formatStageGateDisplay(stageGate: StageGateResult) {
   };
 
   if (stageGate.status === "waiting") {
+    if (stageGate.recoveryKind === "worker_offline") {
+      return {
+        status: statusLabels[stageGate.status],
+        label: "Worker 已停止，Agent 尚未開始",
+        summary:
+          "Agent 已排入佇列；重啟 Worker 後會接續同一筆 run。",
+      };
+    }
+
     return {
       status: statusLabels[stageGate.status],
       label: "worker 執行中",
@@ -6392,7 +6624,7 @@ function formatStageGateListItem(item: string) {
     item.includes("本機背景 Worker 版本不同步") ||
     item.includes("本機 Worker 版本不同步")
   ) {
-    return "本機背景 Worker 版本不同步，請重新下載並重啟 Worker。";
+    return "Worker 需要更新；請更新並重啟 Worker。";
   }
 
   if (item.includes("本機 repo 目前有未提交異動")) {
@@ -6401,6 +6633,20 @@ function formatStageGateListItem(item: string) {
 
   if (item === "Wait for the assigned Local Worker to return artifacts.") {
     return "等待指派的本機 worker 回傳產物。";
+  }
+
+  if (
+    item ===
+    "Wait for the assigned Local Worker to pick up the queued Agent run."
+  ) {
+    return "等待本機 Worker 領取已排入佇列的 Agent。";
+  }
+
+  if (
+    item ===
+    "Restart or refresh the assigned Local Worker so it can pick up the queued Agent run."
+  ) {
+    return "重新下載並重啟本機 Worker，讓它領取已排入佇列的 Agent。";
   }
 
   if (
@@ -6447,7 +6693,9 @@ function formatStageGateListItem(item: string) {
 }
 
 function formatRunDuration(run: WorkerRunView) {
-  const start = Date.parse(run.startedAt ?? run.createdAt);
+  const start = Date.parse(
+    run.status === "queued" ? run.createdAt : (run.startedAt ?? run.createdAt),
+  );
   const end = run.completedAt ? Date.parse(run.completedAt) : Date.now();
   if (Number.isNaN(start) || Number.isNaN(end) || end < start) {
     return "未知";
@@ -6461,6 +6709,35 @@ function formatRunDuration(run: WorkerRunView) {
   }
 
   return `${minutes}m ${remainder}s`;
+}
+
+function inferWorkerStatusReason(
+  workerStatus: LocalLauncherWorkerStatus | null,
+): LocalLauncherState["workerStatusReason"] {
+  if (!workerStatus) {
+    return "";
+  }
+
+  if (!workerStatus.hasProfile) {
+    return "profile_missing";
+  }
+
+  if (workerStatus.running) {
+    return "running";
+  }
+
+  return workerStatus.pid ? "pid_not_running" : "pid_missing";
+}
+
+function getLauncherVersionStatus(
+  launcherVersion: string,
+  expectedLauncherVersion: string,
+): LocalLauncherState["launcherVersionStatus"] {
+  if (!launcherVersion || !expectedLauncherVersion) {
+    return "unknown";
+  }
+
+  return launcherVersion === expectedLauncherVersion ? "current" : "mismatch";
 }
 
 function isRunPastSoftTimeout(run: WorkerRunView) {

@@ -2354,12 +2354,8 @@ function normalizeRequestEvidenceMode(
 function mapWorkerRow(row: unknown): WorkerRegistration {
   const value = row as Record<string, string | number | null>;
   const expectedManifest = getWorkerBootstrapManifest();
-  const expectedVersion =
-    String(value.worker_expected_version ?? "") ||
-    expectedManifest.workerVersion;
-  const expectedScriptHash =
-    String(value.worker_expected_script_hash ?? "") ||
-    getWorkerScriptHash(expectedManifest);
+  const expectedVersion = expectedManifest.workerVersion;
+  const expectedScriptHash = getWorkerScriptHash(expectedManifest);
   const workerVersion = String(value.worker_version ?? "");
   const workerScriptHash = String(value.worker_script_hash ?? "");
   const workerVersionStatus =

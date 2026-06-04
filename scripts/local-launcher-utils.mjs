@@ -7,7 +7,7 @@ export const LOCAL_LAUNCHER_HOST = "127.0.0.1";
 export const LOCAL_LAUNCHER_PORT = Number(
   process.env.CODEX_MISSION_CONTROL_LAUNCHER_PORT || 17320,
 );
-export const LOCAL_LAUNCHER_VERSION = "0.2.0";
+export const LOCAL_LAUNCHER_VERSION = "0.2.1";
 export const LOCAL_LAUNCHER_TASK_NAME = "CodexMissionControlLocalLauncher";
 export const WORKER_MANIFEST_FILE = "worker-manifest.json";
 
@@ -218,6 +218,27 @@ export function redactProfile(profile) {
     workerUpdatedAt: profile.workerUpdatedAt || "",
     connectedAt: profile.connectedAt,
     updatedAt: profile.updatedAt,
+  };
+}
+
+export function buildLauncherWorkerStatus(profile, running) {
+  const pid = Number(profile?.workerPid || 0);
+  const isRunning = Boolean(pid && running);
+  return {
+    hasProfile: Boolean(profile),
+    hasAzurePat: Boolean(profile?.azurePat),
+    running: isRunning,
+    pid: pid || null,
+    workerStatusReason: !profile
+      ? "profile_missing"
+      : isRunning
+        ? "running"
+        : pid
+          ? "pid_not_running"
+          : "pid_missing",
+    workerVersion: profile?.workerVersion || "",
+    workerScriptHash: profile?.workerScriptHash || "",
+    workerUpdatedAt: profile?.workerUpdatedAt || "",
   };
 }
 

@@ -32,6 +32,7 @@ const expectedWorkerScriptHash =
 const launcherVersion = process.env.CONTROL_PLANE_LAUNCHER_VERSION || "";
 const workerUpdatedAt = process.env.CONTROL_PLANE_WORKER_UPDATED_AT || "";
 const intervalMs = Number(process.env.WORKER_POLL_INTERVAL_MS || 5000);
+const pollRetryDelaysMs = [5000, 10000, 30000];
 const once = process.argv.includes("--once");
 const setupOnly = process.argv.includes("--setup-only");
 const skippedRepositoryScanDirs = new Set([
@@ -68,8 +69,26 @@ async function main() {
     );
   });
 
+  let pollFailureCount = 0;
   do {
-    const work = await pollWorker();
+    let work;
+    try {
+      work = await pollWorker();
+      pollFailureCount = 0;
+    } catch (error) {
+      if (error instanceof WorkerStoppedError || !isTransientPollError(error)) {
+        throw error;
+      }
+
+      const retryDelayMs = getPollRetryDelayMs(pollFailureCount);
+      pollFailureCount += 1;
+      console.warn(
+        `[worker:${workerId}] App is temporarily unreachable (${formatError(error)}); worker stays alive and will retry in ${Math.round(retryDelayMs / 1000)}s.`,
+      );
+      await delay(retryDelayMs);
+      continue;
+    }
+
     if (work.setupCodex) {
       await setupCodexCli();
     }
@@ -223,7 +242,7 @@ async function pollWorker() {
       );
     }
 
-    throw new Error(text);
+    throw new Error(`Worker poll failed with HTTP ${response.status}: ${text}`);
   }
 
   const data = await response.json();
@@ -1134,6 +1153,49 @@ function delay(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function getPollRetryDelayMs(failureCount) {
+  return pollRetryDelaysMs[Math.min(failureCount, pollRetryDelaysMs.length - 1)];
+}
+
+function isTransientPollError(error) {
+  const message = formatError(error);
+  if (
+    /HTTP 5\d\d|fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(
+      message,
+    )
+  ) {
+    return true;
+  }
+
+  return getErrorCauseMessages(error).some((causeMessage) =>
+    /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN/i.test(causeMessage),
+  );
+}
+
+function getErrorCauseMessages(error) {
+  const messages = [];
+  const queue = [error];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object") {
+      continue;
+    }
+    if ("code" in current && current.code) {
+      messages.push(String(current.code));
+    }
+    if ("message" in current && current.message) {
+      messages.push(String(current.message));
+    }
+    if ("cause" in current && current.cause) {
+      queue.push(current.cause);
+    }
+    if ("errors" in current && Array.isArray(current.errors)) {
+      queue.push(...current.errors);
+    }
+  }
+  return messages;
 }
 
 main().catch((error) => {

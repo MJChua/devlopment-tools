@@ -53,7 +53,7 @@ test("workflow UI routes missing launcher profiles to toast-only guidance", () =
 
   assert.match(source, /launcher_profile_missing/);
   assert.match(source, /本機連線資料不存在，請按/);
-  assert.match(source, /launcherState\.available && launcherState\.hasProfile/);
+  assert.match(source, /launcherState\.available\s*&&\s*launcherState\.hasProfile/);
   assert.match(source, /workerVersionMismatch && launcherHasProfile/);
   assert.doesNotMatch(source, /本機連線資料已不存在/);
   assert.doesNotMatch(source, /重新連線本機 Worker/);
@@ -129,6 +129,56 @@ test("local worker pushes formal PR branches without merging develop locally", (
   assert.match(source, /pr_branch_outdated/);
   assert.match(source, /origin\/\$\{branchName\}/);
   assert.equal((source.match(/git push/g) ?? []).length, 1);
+});
+
+test("local worker keeps polling when the App is temporarily unreachable", () => {
+  const source = readFileSync(
+    new URL("../scripts/local-worker.mjs", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /pollRetryDelaysMs = \[5000, 10000, 30000\]/);
+  assert.match(source, /App is temporarily unreachable/);
+  assert.match(source, /worker stays alive and will retry/);
+  assert.match(source, /isTransientPollError/);
+  assert.match(source, /WorkerStoppedError/);
+  assert.match(source, /HTTP 5\\d\\d/);
+  assert.match(source, /ECONNREFUSED/);
+});
+
+test("local launcher supervises saved workers and reports stale pids", () => {
+  const launcherSource = readFileSync(
+    new URL("../scripts/local-launcher.mjs", import.meta.url),
+    "utf8",
+  );
+  const utilsSource = readFileSync(
+    new URL("../scripts/local-launcher-utils.mjs", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(launcherSource, /workerSupervisorIntervalMs = 15000/);
+  assert.match(launcherSource, /startWorkerSupervisor\(\)/);
+  assert.match(launcherSource, /superviseSavedProfiles/);
+  assert.match(launcherSource, /worker supervisor restarting/);
+  assert.match(utilsSource, /workerStatusReason/);
+  assert.match(utilsSource, /pid_not_running/);
+});
+
+test("workflow UI keeps launcher recovery guidance concise", () => {
+  const source = readFileSync(
+    new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /Launcher 需要更新/);
+  assert.match(source, /Launcher 暫時模式/);
+  assert.match(source, /複製正式安裝指令/);
+  assert.match(source, /inferWorkerStatusReason/);
+  assert.match(source, /pid_not_running/);
+  assert.match(source, /查看詳情/);
+  assert.doesNotMatch(source, /Launcher 目前是暫時啟動模式/);
+  assert.doesNotMatch(source, /目前 worker 可以使用，但 Scheduled Task 尚未正式安裝/);
+  assert.doesNotMatch(source, /重開機或重新登入後穩定性取決於 Startup/);
 });
 
 test("workflow request records are scoped to the selected repository", () => {

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 test("request repo snapshot is reused across agent runs", async () => {
@@ -1227,6 +1228,7 @@ test("worker runtime metadata is stored and mismatched hashes block dispatch", a
   const {
     createRequest,
     dispatchNextAgent,
+    listWorkers,
     registerWorker,
     updateWorkerRepositoryCandidates,
     updateWorkerSelectedRepository,
@@ -1293,6 +1295,28 @@ test("worker runtime metadata is stored and mismatched hashes block dispatch", a
     },
   });
 
+  {
+    const db = new DatabaseSync(process.env.CONTROL_PLANE_DB_PATH);
+    try {
+      db.prepare(
+        `UPDATE workers
+         SET worker_expected_version = ?, worker_expected_script_hash = ?
+         WHERE worker_id = ?`,
+      ).run("old-worker-version", "0".repeat(64), worker.workerId);
+    } finally {
+      db.close();
+    }
+  }
+
+  const refreshedWorker = listWorkers().find(
+    (candidate) => candidate.workerId === worker.workerId,
+  );
+  assert.equal(refreshedWorker?.workerExpectedVersion, manifest.workerVersion);
+  assert.equal(
+    refreshedWorker?.workerExpectedScriptHash,
+    getWorkerScriptHash(manifest),
+  );
+  assert.equal(refreshedWorker?.workerVersionStatus, "current");
   assert.equal(dispatchNextAgent({ requestId: request.requestId }).status, "queued");
 });
 

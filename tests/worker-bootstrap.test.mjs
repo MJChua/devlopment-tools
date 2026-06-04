@@ -53,6 +53,7 @@ test("worker bootstrap serves a hash manifest for worker scripts", async () => {
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.match(body.workerVersion, /^\d{4}\.\d{2}\.\d{2}\./);
+  assert.equal(body.launcherVersion, "0.2.1");
   assert.equal(
     body.files.some(
       (file) =>
@@ -64,6 +65,22 @@ test("worker bootstrap serves a hash manifest for worker scripts", async () => {
     body.files.some(
       (file) =>
         file.name === "local-worker-utils.mjs" &&
+        /^[a-f0-9]{64}$/.test(file.sha256),
+    ),
+    true,
+  );
+  assert.equal(
+    body.launcherFiles.some(
+      (file) =>
+        file.name === "local-launcher.mjs" &&
+        /^[a-f0-9]{64}$/.test(file.sha256),
+    ),
+    true,
+  );
+  assert.equal(
+    body.launcherFiles.some(
+      (file) =>
+        file.name === "local-launcher-utils.mjs" &&
         /^[a-f0-9]{64}$/.test(file.sha256),
     ),
     true,

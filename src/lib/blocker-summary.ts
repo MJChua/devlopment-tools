@@ -87,6 +87,20 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
   }
 
   if (
+    normalized.includes("worker_offline") ||
+    normalized.includes("worker has not picked up") ||
+    normalized.includes("still queued") ||
+    normalized.includes("尚未領取")
+  ) {
+    return {
+      title: "Worker 已停止，Agent 尚未開始",
+      reason: "Agent run 還在 queued，沒有真正開始執行。",
+      nextAction: "按「重啟 Worker」，保留同一筆 run 接續處理。",
+      original,
+    };
+  }
+
+  if (
     normalized.includes("worker_internal_error") ||
     normalized.includes("referenceerror") ||
     normalized.includes("is not defined")

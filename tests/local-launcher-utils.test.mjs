@@ -7,6 +7,7 @@ import test from "node:test";
 const {
   buildCorsHeaders,
   buildControlPlaneAzureRequestBody,
+  buildLauncherWorkerStatus,
   buildWorkerEnvironment,
   clearLauncherProfilePat,
   deleteLauncherProfile,
@@ -137,7 +138,7 @@ test("launcher worker environment preserves runtime inputs without logging secre
     WORKER_ID: "worker",
     WORKER_TOKEN: "cw_token",
     CODEX_SANDBOX_MODE: "workspace-write",
-    CONTROL_PLANE_LAUNCHER_VERSION: "0.2.0",
+    CONTROL_PLANE_LAUNCHER_VERSION: "0.2.1",
     REPO_PATH: "C:\\repo",
     AZURE_DEVOPS_PAT: "secret-pat",
     CONTROL_PLANE_AUTO_COMMIT_PR: "1",
@@ -178,6 +179,51 @@ test("launcher worker manifest metadata is validated and attached to worker env"
   assert.throws(
     () => normalizeWorkerBootstrapManifest({ workerVersion: "", files: [] }),
     /manifest is invalid/,
+  );
+});
+
+test("launcher worker status reports stale profile pids explicitly", () => {
+  assert.deepEqual(buildLauncherWorkerStatus(null, false), {
+    hasProfile: false,
+    hasAzurePat: false,
+    running: false,
+    pid: null,
+    workerStatusReason: "profile_missing",
+    workerVersion: "",
+    workerScriptHash: "",
+    workerUpdatedAt: "",
+  });
+
+  assert.deepEqual(
+    buildLauncherWorkerStatus(
+      {
+        azurePat: "secret-pat",
+        workerPid: 41112,
+        workerVersion: "2026.05.29.1",
+        workerScriptHash: "a".repeat(64),
+        workerUpdatedAt: "2026-06-02T08:38:24.687Z",
+      },
+      false,
+    ),
+    {
+      hasProfile: true,
+      hasAzurePat: true,
+      running: false,
+      pid: 41112,
+      workerStatusReason: "pid_not_running",
+      workerVersion: "2026.05.29.1",
+      workerScriptHash: "a".repeat(64),
+      workerUpdatedAt: "2026-06-02T08:38:24.687Z",
+    },
+  );
+
+  assert.equal(
+    buildLauncherWorkerStatus({ workerPid: 41112 }, true).workerStatusReason,
+    "running",
+  );
+  assert.equal(
+    buildLauncherWorkerStatus({ workerPid: 0 }, false).workerStatusReason,
+    "pid_missing",
   );
 });
 
@@ -321,7 +367,7 @@ test("launcher profile PAT clear preserves non-secret worker settings", async ()
     WORKER_ID: "worker-clear-pat",
     WORKER_TOKEN: "token",
     CODEX_SANDBOX_MODE: "danger-full-access",
-    CONTROL_PLANE_LAUNCHER_VERSION: "0.2.0",
+    CONTROL_PLANE_LAUNCHER_VERSION: "0.2.1",
     REPO_PATH: "C:\\repo",
     CONTROL_PLANE_AUTO_COMMIT_PR: "1",
   });
