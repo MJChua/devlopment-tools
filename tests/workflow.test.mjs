@@ -340,6 +340,33 @@ test("draft PR packet derives team branch trace from Azure Work Item", () => {
   assert.match(packet, /App will discover and track the active Azure PR automatically/);
 });
 
+test("verified Azure Work Item trace does not require number in request text", () => {
+  const request = createWorkflowRequestFromInput(
+    {
+      kind: "BUG",
+      title: "Member search submit",
+      detail:
+        "Member search does nothing after submit. Expected results matching login name.",
+      taskLevel: "Level 1",
+      owner: "Michael",
+      assignedWorkerId: "michael-local",
+      deliveryMode: "draft_pr",
+      azureReferenceType: "work-item",
+      azureReferenceId: "795",
+      azureReferenceEvidence: verifiedWorkItemEvidence("795", {
+        workItemType: "Bug",
+      }),
+    },
+    new Date(2026, 4, 25, 14, 30),
+  );
+  const trace = getPrDeliveryTraceForRequest(request);
+
+  assert.equal(request.azureReferenceType, "work-item");
+  assert.equal(request.azureReferenceId, "795");
+  assert.equal(trace.sourceBranch, "bug/795");
+  assert.equal(trace.workItemId, "795");
+});
+
 test("draft PR branch trace requires verified Work Item evidence", () => {
   const trackingRequest = sampleRequest({
     azureReferenceId: "390",

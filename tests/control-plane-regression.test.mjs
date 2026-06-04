@@ -285,6 +285,25 @@ test("request record titles hide legacy English placeholders", () => {
   assert.match(workflowSource, /中文分類摘要；不要宣稱來源已確認/);
 });
 
+test("request intake text does not ask users to repeat selected Azure numbers", () => {
+  const source = readFileSync(
+    new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    source,
+    /例：會員搜尋頁按下查詢沒有反應，附截圖；預期顯示符合 login name 的結果。/,
+  );
+  assert.doesNotMatch(source, /單號 795/);
+  assert.match(source, /不需要在需求內容重複填寫/);
+  assert.match(source, /建立正式 PR 前需要選擇並驗證 Azure 單號/);
+  assert.match(
+    source,
+    /const azureReference = canUseSelectedWorkItem[\s\S]*requestForm\.azureWorkItemId[\s\S]*: extractAzureReferenceFromDetail\(requestForm\.detail\)/,
+  );
+});
+
 test("blocker recovery exposes one rerun Agent action", () => {
   const source = readFileSync(
     new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),

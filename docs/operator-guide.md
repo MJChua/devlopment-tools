@@ -172,7 +172,7 @@ The workflow may create a Draft Azure PR for a verified request branch. It does 
 
 Request Intake captures a user's request as intake evidence before an Agent thread is opened.
 
-The normal user-facing input is only the request text. The App shows a provisional preview, then local Codex returns the workflow interpretation:
+The primary user-facing freeform input is the request text. The App shows a provisional preview, then local Codex returns the workflow interpretation:
 
 - Request kind: `REQ`, `BUG`, `HOTFIX`, `REF`, `DOC`, or `OPS`.
 - Request title.
@@ -180,6 +180,8 @@ The normal user-facing input is only the request text. The App shows a provision
 - Missing source signals.
 - High-risk operation signals.
 - Optional Azure PR or Azure 單號 reference when the text includes a recognizable reference.
+
+When the Azure 單號 picker is available, users should select the Work Item there and do not need to repeat the number in the request text. If no picker value is selected, the text parser may still treat recognizable `單號 795` / `Work Item 795` text as a tracking reference only until the Work Item is verified.
 
 The generated Request ID uses:
 

@@ -2885,7 +2885,7 @@ export function WorkflowControlPlane() {
                 onPaste={handleRequestDetailPaste}
                 placeholder={
                   requestForm.deliveryMode
-                    ? "例：會員搜尋頁按下查詢沒有反應，附截圖；預期顯示符合 login name 的結果。單號 795。"
+                    ? "例：會員搜尋頁按下查詢沒有反應，附截圖；預期顯示符合 login name 的結果。"
                     : "請先選擇交付方式。"
                 }
               />
@@ -4905,7 +4905,8 @@ function AzureNumberIntake({
 
       {selectedItem ? (
         <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-950">
-          已讀取 Azure 單號內容：{formatAzureNumberLabel(selectedItem)}
+          已讀取 Azure 單號內容：{formatAzureNumberLabel(selectedItem)}。此單號會用於
+          PR 分支與 Azure 追蹤，不需要在需求內容重複填寫。
         </div>
       ) : null}
 
@@ -4913,6 +4914,12 @@ function AzureNumberIntake({
         <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-950">
           目前選到 Azure 單號 #{value}，但清單未讀到內容。送出時會標為
           tracking reference only，不會當成已驗證來源。
+        </div>
+      ) : null}
+
+      {!value ? (
+        <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-slate-600">
+          建立正式 PR 前需要選擇並驗證 Azure 單號；需求內容只需要描述要做什麼與預期結果。
         </div>
       ) : null}
 
