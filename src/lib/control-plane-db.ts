@@ -56,18 +56,25 @@ import {
   getWorkerScriptHash,
 } from "./worker-bootstrap-manifest.ts";
 
-const DATA_DIR = path.join(
-  /*turbopackIgnore: true*/ process.cwd(),
-  ".control-plane",
-);
-const DB_PATH =
-  process.env.CONTROL_PLANE_DB_PATH ??
-  path.join(DATA_DIR, "control-plane.sqlite");
-const ATTACHMENT_DIR =
-  process.env.CONTROL_PLANE_ATTACHMENT_DIR ??
-  path.join(DATA_DIR, "request-attachments");
-
 let database: DatabaseSync | null = null;
+
+function getDataDir() {
+  return path.join(process.cwd(), ".control-plane");
+}
+
+function getDbPath() {
+  return (
+    process.env.CONTROL_PLANE_DB_PATH ??
+    path.join(getDataDir(), "control-plane.sqlite")
+  );
+}
+
+function getAttachmentDir() {
+  return (
+    process.env.CONTROL_PLANE_ATTACHMENT_DIR ??
+    path.join(getDataDir(), "request-attachments")
+  );
+}
 
 export type CompleteWorkerRunInput = {
   status: Exclude<WorkerRunStatus, "queued" | "running">;
@@ -314,7 +321,7 @@ export function createRequestAttachment(
   const purpose = normalizeAttachmentPurpose(input.purpose);
   const recoveryOfRunId = input.recoveryOfRunId?.trim() ?? "";
   const actor = input.actor?.trim() || request.owner;
-  const requestAttachmentDir = path.join(ATTACHMENT_DIR, input.requestId);
+  const requestAttachmentDir = path.join(getAttachmentDir(), input.requestId);
   mkdirSync(requestAttachmentDir, { recursive: true });
   const storagePath = path.join(requestAttachmentDir, `${attachmentId}${extension}`);
   writeFileSync(storagePath, data);
@@ -2288,8 +2295,8 @@ function getDatabase() {
     return database;
   }
 
-  mkdirSync(DATA_DIR, { recursive: true });
-  database = new DatabaseSync(DB_PATH);
+  mkdirSync(getDataDir(), { recursive: true });
+  database = new DatabaseSync(getDbPath());
   database.exec(`
     PRAGMA journal_mode = WAL;
     CREATE TABLE IF NOT EXISTS workflow_requests (

@@ -29,11 +29,13 @@ export function scanRepoCandidatesForAgent1(
   request: WorkflowRequest,
 ): RepoCandidateScan | null {
   const rootPath = request.repoPath.trim();
-  if (!rootPath || !existsSync(rootPath)) {
+  if (!rootPath || !existsSync(/*turbopackIgnore: true*/ rootPath)) {
     return null;
   }
 
-  const cacheKey = path.resolve(rootPath).toLowerCase();
+  const cacheKey = path
+    .resolve(/*turbopackIgnore: true*/ rootPath)
+    .toLowerCase();
   const revision = getRepoScanRevision(rootPath);
   const cached = scanCache.get(cacheKey);
   if (cached?.revision === revision) {
@@ -69,30 +71,30 @@ function readGitRevision(rootPath: string) {
 
   try {
     const headPath = path.join(gitDir, "HEAD");
-    const head = readFileSync(headPath, "utf8").trim();
+    const head = readFileSync(/*turbopackIgnore: true*/ headPath, "utf8").trim();
     if (!head.startsWith("ref:")) {
       return `${head}|${readMtime(headPath)}`;
     }
 
     const refPath = path.join(gitDir, head.slice("ref:".length).trim());
-    return `${head}|${readFileSync(refPath, "utf8").trim()}|${readMtime(refPath)}`;
+    return `${head}|${readFileSync(/*turbopackIgnore: true*/ refPath, "utf8").trim()}|${readMtime(refPath)}`;
   } catch {
     return `git-dir:${readMtime(gitDir)}`;
   }
 }
 
 function resolveGitDir(rootPath: string, gitPath: string) {
-  if (!existsSync(gitPath)) {
+  if (!existsSync(/*turbopackIgnore: true*/ gitPath)) {
     return "";
   }
 
   try {
-    const stat = statSync(gitPath);
+    const stat = statSync(/*turbopackIgnore: true*/ gitPath);
     if (stat.isDirectory()) {
       return gitPath;
     }
 
-    const content = readFileSync(gitPath, "utf8").trim();
+    const content = readFileSync(/*turbopackIgnore: true*/ gitPath, "utf8").trim();
     const match = content.match(/^gitdir:\s*(.+)$/i);
     if (!match) {
       return "";
@@ -109,7 +111,7 @@ function resolveGitDir(rootPath: string, gitPath: string) {
 
 function readMtime(targetPath: string) {
   try {
-    return String(Math.round(statSync(targetPath).mtimeMs));
+    return String(Math.round(statSync(/*turbopackIgnore: true*/ targetPath).mtimeMs));
   } catch {
     return "0";
   }
@@ -128,13 +130,13 @@ function cloneScan(scan: RepoCandidateScan | null) {
 
 function scanApps(rootPath: string, warnings: string[]): RepoCandidateScanEntry[] {
   const appsRoot = path.join(rootPath, "apps");
-  if (!existsSync(appsRoot)) {
+  if (!existsSync(/*turbopackIgnore: true*/ appsRoot)) {
     warnings.push("No apps/ directory was found during pre-scan.");
     return [];
   }
 
   try {
-    return readdirSync(appsRoot, { withFileTypes: true })
+    return readdirSync(/*turbopackIgnore: true*/ appsRoot, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => {
         const appPath = path.join("apps", entry.name);
@@ -160,7 +162,7 @@ function scanSurfaces(
   warnings: string[],
 ): RepoCandidateScanEntry[] {
   const srcRoot = path.join(rootPath, app.path, "src");
-  if (!existsSync(srcRoot)) {
+  if (!existsSync(/*turbopackIgnore: true*/ srcRoot)) {
     return [];
   }
 
@@ -177,7 +179,10 @@ function scanSurfaces(
     if (!nameMatch) {
       try {
         contentMatch = SURFACE_TEXT_PATTERN.test(
-          readFileSync(absoluteFile, "utf8").slice(0, 12000),
+          readFileSync(/*turbopackIgnore: true*/ absoluteFile, "utf8").slice(
+            0,
+            12000,
+          ),
         );
       } catch {
         contentMatch = false;
@@ -211,7 +216,9 @@ function collectFiles(dir: string, files: string[], maxFiles: number) {
 
   let entries;
   try {
-    entries = readdirSync(dir, { withFileTypes: true });
+    entries = readdirSync(/*turbopackIgnore: true*/ dir, {
+      withFileTypes: true,
+    });
   } catch {
     return;
   }
@@ -234,7 +241,7 @@ function collectFiles(dir: string, files: string[], maxFiles: number) {
     }
 
     try {
-      if (statSync(absolute).size <= 250_000) {
+      if (statSync(/*turbopackIgnore: true*/ absolute).size <= 250_000) {
         files.push(absolute);
       }
     } catch {
@@ -245,7 +252,9 @@ function collectFiles(dir: string, files: string[], maxFiles: number) {
 
 function readPackageName(packageJson: string) {
   try {
-    const parsed = JSON.parse(readFileSync(packageJson, "utf8"));
+    const parsed = JSON.parse(
+      readFileSync(/*turbopackIgnore: true*/ packageJson, "utf8"),
+    );
     return typeof parsed.name === "string" ? parsed.name : "";
   } catch {
     return "";

@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "node scripts/run-with-realtime.mjs dev",
     "build": "next build",
+    "typegen": "next typegen",
     "start": "node scripts/run-with-realtime.mjs start",
     "lint": "eslint",
     "smoke": "node scripts/smoke-control-plane.mjs",
