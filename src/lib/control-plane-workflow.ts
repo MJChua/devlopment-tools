@@ -239,6 +239,7 @@ export type WorkerRegistration = {
   codexSetupRequestedAt: string | null;
   repositoryCandidates: RepositoryCandidate[];
   repositoryCandidatesUpdatedAt: string | null;
+  hasOpenRuns: boolean;
   status: "registered" | "active" | "disabled";
   lastSeenAt: string | null;
   createdAt: string;

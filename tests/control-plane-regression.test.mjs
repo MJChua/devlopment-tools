@@ -59,6 +59,23 @@ test("workflow UI routes missing launcher profiles to toast-only guidance", () =
   assert.doesNotMatch(source, /重新連線本機 Worker/);
 });
 
+test("workflow UI blocks worker disconnect only for open Agent runs", () => {
+  const source = readFileSync(
+    new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    source,
+    /const workerHasOpenRuns = Boolean\(currentWorker\?\.hasOpenRuns\)/,
+  );
+  assert.match(source, /localWorkerConnected && workerHasOpenRuns/);
+  assert.match(source, /activeRun=\{workerHasOpenRuns\}/);
+  assert.match(source, /if \(workerHasOpenRuns\)/);
+  assert.doesNotMatch(source, /workerHasActiveRequest/);
+  assert.doesNotMatch(source, /localWorkerConnected && workerHasActiveRequest/);
+});
+
 test("single working tree mode replaces request worktree branch preparation", () => {
   const workerSource = readFileSync(
     new URL("../scripts/local-worker.mjs", import.meta.url),

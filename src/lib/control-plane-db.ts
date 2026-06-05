@@ -568,7 +568,18 @@ export function registerWorker(input: {
 
 export function listWorkers(): WorkerRegistration[] {
   return getDatabase()
-    .prepare(`SELECT * FROM workers ORDER BY updated_at DESC`)
+    .prepare(
+      `SELECT workers.*,
+              CASE WHEN open_runs.worker_id IS NULL THEN 0 ELSE 1 END AS has_open_runs
+       FROM workers
+       LEFT JOIN (
+         SELECT worker_id
+         FROM worker_runs
+         WHERE status IN ('queued', 'running')
+         GROUP BY worker_id
+       ) AS open_runs ON open_runs.worker_id = workers.worker_id
+       ORDER BY workers.updated_at DESC`,
+    )
     .all()
     .map(mapWorkerRow);
 }
@@ -2678,6 +2689,7 @@ function mapWorkerRow(row: unknown): WorkerRegistration {
     repositoryCandidatesUpdatedAt: value.repository_candidates_updated_at
       ? String(value.repository_candidates_updated_at)
       : null,
+    hasOpenRuns: value.has_open_runs === 1 || value.has_open_runs === "1",
     status:
       value.status === "active"
         ? "active"

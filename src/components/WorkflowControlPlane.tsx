@@ -514,14 +514,7 @@ export function WorkflowControlPlane() {
     Boolean(workerForm.azurePat.trim()) ||
     (launcherState.available && launcherState.hasAzurePat);
   const hasPrDiscoveryAccess = hasAzureWorkItemAccess;
-  const workerHasActiveRequest = Boolean(
-    currentWorker &&
-      requests.some(
-        (request) =>
-          request.assignedWorkerId === currentWorker.workerId &&
-          isActiveWorkflowStage(request.status),
-      ),
-  );
+  const workerHasOpenRuns = Boolean(currentWorker?.hasOpenRuns);
   const controlPlaneUrl = runtimeConfig.controlPlaneUrl;
   const launcherConnectionButtonLabel = localWorkerConnected
     ? "停止連線"
@@ -531,9 +524,9 @@ export function WorkflowControlPlane() {
   const launcherConnectionButtonDisabled =
     launcherActionState === "loading" ||
     state === "loading" ||
-    (localWorkerConnected && workerHasActiveRequest);
+    (localWorkerConnected && workerHasOpenRuns);
   const launcherConnectionButtonTitle = localWorkerConnected
-    ? workerHasActiveRequest
+    ? workerHasOpenRuns
       ? "Agent 執行中，完成後可停止"
       : "停止本機 worker 連線"
     : launcherState.available
@@ -584,7 +577,7 @@ export function WorkflowControlPlane() {
   );
   const hasLauncherSecondaryControls = Boolean(
     lastRegisteredWorker ||
-      workerHasActiveRequest ||
+      workerHasOpenRuns ||
       (currentWorker && !launcherVersionMismatch),
   );
   const selectedWorker = useMemo(
@@ -2342,7 +2335,7 @@ export function WorkflowControlPlane() {
       return;
     }
 
-    if (workerHasActiveRequest) {
+    if (workerHasOpenRuns) {
       setState("error");
       setMessage("Agent 執行中，完成後可清除 PAT。");
       return;
@@ -2619,7 +2612,7 @@ export function WorkflowControlPlane() {
                       type="password"
                     />
                     <PatPersistenceStatus
-                      activeRun={workerHasActiveRequest}
+                      activeRun={workerHasOpenRuns}
                       clearing={launcherActionState === "loading"}
                       hasSavedPat={launcherState.hasAzurePat}
                       onClear={clearSavedAzurePat}
@@ -2808,7 +2801,7 @@ export function WorkflowControlPlane() {
                         </button>
                       ) : null}
                     </div>
-                    {workerHasActiveRequest ? (
+                    {workerHasOpenRuns ? (
                       <p className="text-xs leading-5 text-slate-500">
                         目前有 Agent 任務等待或執行中，App
                         會先保護這次連線；完成後才可停止。

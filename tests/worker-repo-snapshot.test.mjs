@@ -1620,6 +1620,104 @@ test("worker guard blocks PAT clear while an Agent task is queued", async () => 
   );
 });
 
+test("worker open-run flag ignores blocked and PR-ready requests", async () => {
+  const {
+    assertWorkerHasNoActiveRuns,
+    completeWorkerRun,
+    createRequest,
+    dispatchNextAgent,
+    listWorkers,
+    registerWorker,
+    updateRequestStage,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+
+  const suffix = randomUUID();
+  const worker = registerWorker({
+    workerId: `worker-open-runs-${suffix}`,
+    displayName: "Open Runs Worker",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = `C:\\workspace\\repo-open-runs-${suffix}`;
+
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "repo-open-runs", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+
+  const getWorker = () =>
+    listWorkers().find((candidate) => candidate.workerId === worker.workerId);
+
+  assert.equal(getWorker()?.hasOpenRuns, false);
+
+  const request = createRequest({
+    detail: "Track open-run state.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+  });
+  const queuedRun = dispatchNextAgent({ requestId: request.requestId });
+  assert.equal(queuedRun.status, "queued");
+  assert.equal(getWorker()?.hasOpenRuns, true);
+
+  completeWorkerRun(worker.workerId, worker.token, queuedRun.runId, {
+    status: "blocked",
+    commandOutput: "blocked",
+    diffSummary: "clean",
+    artifact: "# Agent0\n\nBlocked by test.",
+    error: "Blocked by test.",
+  });
+  assert.equal(getWorker()?.hasOpenRuns, false);
+  assert.doesNotThrow(() =>
+    assertWorkerHasNoActiveRuns(worker.workerId, "stop worker"),
+  );
+
+  updateRequestStage(request.requestId, "review");
+  const cancelledRun = dispatchNextAgent({
+    requestId: request.requestId,
+    agentRole: "agent3",
+  });
+  assert.equal(getWorker()?.hasOpenRuns, true);
+  completeWorkerRun(worker.workerId, worker.token, cancelledRun.runId, {
+    status: "cancelled",
+    commandOutput: "cancelled",
+    diffSummary: "clean",
+    artifact: "# Agent3\n\nCancelled by test.",
+  });
+  assert.equal(getWorker()?.hasOpenRuns, false);
+  assert.doesNotThrow(() =>
+    assertWorkerHasNoActiveRuns(worker.workerId, "stop worker"),
+  );
+
+  updateRequestStage(request.requestId, "review");
+  const reviewRun = dispatchNextAgent({
+    requestId: request.requestId,
+    agentRole: "agent3",
+  });
+  assert.equal(getWorker()?.hasOpenRuns, true);
+  completeWorkerRun(worker.workerId, worker.token, reviewRun.runId, {
+    status: "completed",
+    commandOutput: "ok",
+    diffSummary: "clean",
+    artifact: sampleCompletedArtifact("agent3"),
+  });
+  assert.equal(getWorker()?.hasOpenRuns, false);
+  assert.doesNotThrow(() =>
+    assertWorkerHasNoActiveRuns(worker.workerId, "stop worker"),
+  );
+});
+
 test("worker runtime metadata is stored and mismatched hashes block dispatch", async () => {
   const {
     createRequest,
