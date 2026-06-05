@@ -59,6 +59,30 @@ test("workflow UI routes missing launcher profiles to toast-only guidance", () =
   assert.doesNotMatch(source, /重新連線本機 Worker/);
 });
 
+test("single working tree mode replaces request worktree branch preparation", () => {
+  const workerSource = readFileSync(
+    new URL("../scripts/local-worker.mjs", import.meta.url),
+    "utf8",
+  );
+  const launcherSource = readFileSync(
+    new URL("../scripts/local-launcher.mjs", import.meta.url),
+    "utf8",
+  );
+  const uiSource = readFileSync(
+    new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.doesNotMatch(workerSource, /git worktree add/);
+  assert.doesNotMatch(workerSource, /\.codex-request-worktrees/);
+  assert.match(workerSource, /Preparing local workspace/);
+  assert.match(workerSource, /branch_start_confirmation_required/);
+  assert.match(workerSource, /checkoutLatestDevelop/);
+  assert.match(launcherSource, /\/repository\/status/);
+  assert.match(uiSource, /BranchStartConfirmationDialog/);
+  assert.match(uiSource, /branchStartConfirmed/);
+});
+
 test("testing-stage write policy allows only AITraining source branches", () => {
   assert.equal(
     normalizeBranchName("refs/heads/AITraining/test_p"),

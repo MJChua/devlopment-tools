@@ -77,6 +77,7 @@ import {
   RUN_SOFT_TIMEOUT_MS,
   getPrDeliveryTraceForRequest,
   getNextAgentRole,
+  normalizeAzureReferenceEvidence,
   type AzureReferenceEvidence,
   type ClarificationPrompt,
   type DeliveryMode,
@@ -199,6 +200,22 @@ type LocalLauncherWorkerStatus = {
   workerVersion?: string;
   workerScriptHash?: string;
   workerUpdatedAt?: string;
+};
+
+type LocalLauncherRepositoryStatus = {
+  ok: boolean;
+  repoPath: string;
+  rootPath: string;
+  currentBranch: string;
+  dirty: boolean;
+  hasOriginDevelop: boolean;
+  error: string;
+};
+
+type BranchStartPrompt = {
+  repoPath: string;
+  currentBranch: string;
+  targetBranch: string;
 };
 
 type LauncherError = Error & { code?: string };
@@ -395,6 +412,8 @@ export function WorkflowControlPlane() {
   });
   const [state, setState] = useState<LoadState>("idle");
   const [message, setMessage] = useState("");
+  const [branchStartPrompt, setBranchStartPrompt] =
+    useState<BranchStartPrompt | null>(null);
   const [activeWorkspaceTab, setActiveWorkspaceTab] =
     useState<WorkspaceTab>("new");
   const [requestListCollapsed, setRequestListCollapsed] = useState(true);
@@ -1687,7 +1706,9 @@ export function WorkflowControlPlane() {
     }
   }
 
-  async function createWorkflowRequest() {
+  async function createWorkflowRequest(
+    options: { branchStartConfirmed?: boolean; skipBranchCheck?: boolean } = {},
+  ) {
     setState("loading");
     setMessage("正在建立需求，準備進入處理進度...");
 
@@ -1717,7 +1738,61 @@ export function WorkflowControlPlane() {
         : extractAzureReferenceFromDetail(requestForm.detail);
       const azureReferenceEvidence =
         await buildAzureReferenceEvidence(azureReference);
+      const normalizedAzureReferenceEvidence = normalizeAzureReferenceEvidence(
+        azureReferenceEvidence,
+        azureReference.type,
+        azureReference.id,
+      );
       const assignedWorkerId = currentWorker.workerId;
+      const prDeliveryTrace = getPrDeliveryTraceForRequest({
+        deliveryMode,
+        azureReferenceType: azureReference.type,
+        azureReferenceId: azureReference.id,
+        azureReferenceEvidence: normalizedAzureReferenceEvidence,
+        kind: interpretation.kind,
+      });
+      let branchStartConfirmed = options.branchStartConfirmed === true;
+      if (
+        !options.skipBranchCheck &&
+        deliveryMode === "draft_pr" &&
+        prDeliveryTrace.sourceBranch
+      ) {
+        const repoStatus = await fetchLauncherJson<LocalLauncherRepositoryStatus>(
+          "/repository/status",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              workerId: assignedWorkerId,
+              repoPath: selectedRepoPath,
+            }),
+          },
+        );
+        if (repoStatus.dirty) {
+          throw new Error(
+            "目前本機工作區有未提交變更。請先 commit、stash 或 discard 後再建立新需求。",
+          );
+        }
+        if (!repoStatus.hasOriginDevelop) {
+          throw new Error(
+            "目前本機工作區找不到 origin/develop，無法從最新 develop 建立需求分支。",
+          );
+        }
+        const currentBranch = repoStatus.currentBranch || "detached HEAD";
+        if (
+          currentBranch !== "develop" &&
+          currentBranch !== prDeliveryTrace.sourceBranch
+        ) {
+          setBranchStartPrompt({
+            repoPath: selectedRepoPath,
+            currentBranch,
+            targetBranch: prDeliveryTrace.sourceBranch,
+          });
+          setState("idle");
+          setMessage("");
+          return;
+        }
+        branchStartConfirmed = false;
+      }
       const result = await fetchJson<{ request: WorkflowRequest }>(
         "/api/requests",
         {
@@ -1731,11 +1806,12 @@ export function WorkflowControlPlane() {
             taskLevel: interpretation.taskLevel,
             azureReferenceType: azureReference.type,
             azureReferenceId: azureReference.id,
-            azureReferenceEvidence,
+            azureReferenceEvidence: normalizedAzureReferenceEvidence,
             repoPath: selectedRepoPath,
             deliveryMode,
             evidenceMode: "standard",
             templateId: "freeform",
+            branchStartConfirmed,
             interpretation,
           }),
         },
@@ -2815,6 +2891,20 @@ export function WorkflowControlPlane() {
             />
           ) : null}
 
+          <BranchStartConfirmationDialog
+            loading={state === "loading"}
+            open={Boolean(branchStartPrompt)}
+            prompt={branchStartPrompt}
+            onCancel={() => setBranchStartPrompt(null)}
+            onConfirm={() => {
+              setBranchStartPrompt(null);
+              void createWorkflowRequest({
+                branchStartConfirmed: true,
+                skipBranchCheck: true,
+              });
+            }}
+          />
+
           {canUseWorkflow ? (
             <WorkspaceTabs
               activeTab={activeWorkspaceTab}
@@ -2945,7 +3035,7 @@ export function WorkflowControlPlane() {
             <button
               className="mt-4 inline-flex items-center justify-center gap-2 rounded-md bg-blue-700 px-3 py-2 text-sm font-semibold text-white disabled:bg-slate-300"
               disabled={!requestForm.deliveryMode || !requestForm.detail.trim()}
-              onClick={createWorkflowRequest}
+              onClick={() => void createWorkflowRequest()}
               type="button"
             >
               <Play className="h-4 w-4" />
@@ -3302,6 +3392,53 @@ function QuickClarificationDialog({
               <Play className="h-4 w-4" />
             )}
             確認並續跑
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function BranchStartConfirmationDialog({
+  loading,
+  open,
+  prompt,
+  onCancel,
+  onConfirm,
+}: {
+  loading: boolean;
+  open: boolean;
+  prompt: BranchStartPrompt | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          onCancel();
+        }
+      }}
+    >
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>切回 develop 後開始需求</DialogTitle>
+          <DialogDescription>
+            目前本機工作區停在 {prompt?.currentBranch || "未知分支"}。確認後會切回
+            develop、拉取最新 origin/develop，然後準備 {prompt?.targetBranch || "需求分支"}。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-950">
+          <div>目前本機工作區：{prompt?.repoPath || "未選擇"}</div>
+          <div>APP 不會自動 stash 或覆蓋未提交變更；如果工作區不乾淨，Worker 會阻擋。</div>
+        </div>
+        <DialogFooter>
+          <Button disabled={loading} onClick={onCancel} type="button" variant="outline">
+            取消
+          </Button>
+          <Button disabled={loading} onClick={onConfirm} type="button">
+            確認切回 develop
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -6371,6 +6508,8 @@ function isActiveWorkflowStage(stage: WorkflowRequest["status"]) {
     "ready_for_implementation",
     "running",
     "review",
+    "blocked",
+    "pr_ready",
   ].includes(stage);
 }
 

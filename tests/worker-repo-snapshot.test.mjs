@@ -71,6 +71,59 @@ test("request repo snapshot is reused across agent runs", async () => {
   assert.equal(agent1?.repoPath, repoA);
 });
 
+test("same worker and repo cannot start a second active request", async () => {
+  const {
+    createRequest,
+    registerWorker,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+
+  const worker = registerWorker({
+    workerId: `worker-active-repo-${randomUUID()}`,
+    displayName: "Active Repo Worker",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = `C:\\workspace\\repo-active-${randomUUID()}`;
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "repo-active", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+
+  createRequest({
+    title: `First active request ${randomUUID()}`,
+    detail: "First request.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+    deliveryMode: "no_pr",
+  });
+
+  assert.throws(
+    () =>
+      createRequest({
+        title: `Second active request ${randomUUID()}`,
+        detail: "Second request.",
+        assignedWorkerId: worker.workerId,
+        repoPath,
+        azureReferenceType: "none",
+        azureReferenceId: "",
+        deliveryMode: "no_pr",
+      }),
+    /already has an active request/i,
+  );
+});
+
 test("no-PR workflow auto-dispatches through Agent3 and then delivers", async () => {
   const {
     completeWorkerRun,
@@ -259,7 +312,7 @@ test("Agent3 block review keeps request blocked instead of PR ready", async () =
   assert.match(blockedRun.error, /delivery review blocked PR readiness/i);
 });
 
-test("Agent3 uses Agent2 execution repo path when worker reports a request worktree", async () => {
+test("Agent3 uses selected repo path in single working tree mode", async () => {
   const {
     completeWorkerRun,
     createRequest,
@@ -273,17 +326,17 @@ test("Agent3 uses Agent2 execution repo path when worker reports a request workt
   } = await import("../src/lib/control-plane-db.ts");
 
   const worker = registerWorker({
-    workerId: `worker-worktree-path-${randomUUID()}`,
-    displayName: "Worktree Path Worker",
+    workerId: `worker-single-tree-${randomUUID()}`,
+    displayName: "Single Tree Worker",
     commandTemplate: "echo ok",
   });
-  const repoPath = "C:\\workspace\\repo-worktree-source";
-  const worktreePath = "C:\\workspace\\.codex-request-worktrees\\REQ-test";
+  const repoPath = "C:\\workspace\\repo-single-tree";
+  const staleExecutionPath = "C:\\workspace\\ignored-agent2-path";
 
   updateWorkerRepositoryCandidates({
     workerId: worker.workerId,
     token: worker.token,
-    repositories: [{ name: "repo-worktree-source", path: repoPath, source: "scan" }],
+    repositories: [{ name: "repo-single-tree", path: repoPath, source: "scan" }],
     readiness: {
       codexReady: true,
       codexStatus: "ready",
@@ -326,8 +379,8 @@ test("Agent3 uses Agent2 execution repo path when worker reports a request workt
   const agent2 = getRun(getRequestDetail(request.requestId), "agent2");
 
   heartbeatWorkerRun(worker.workerId, worker.token, agent2.runId, {
-    progressLabel: "Preparing request worktree",
-    executionRepoPath: worktreePath,
+    progressLabel: "Preparing local workspace",
+    executionRepoPath: staleExecutionPath,
   });
   completeAndAssertNext({
     completeWorkerRun,
@@ -340,8 +393,9 @@ test("Agent3 uses Agent2 execution repo path when worker reports a request workt
   });
 
   const agent3 = getRun(getRequestDetail(request.requestId), "agent3");
-  assert.equal(agent3.repoPath, worktreePath);
-  assert.match(agent3.packet, new RegExp(escapeRegExp(worktreePath)));
+  assert.equal(agent3.repoPath, repoPath);
+  assert.match(agent3.packet, new RegExp(escapeRegExp(repoPath)));
+  assert.doesNotMatch(agent3.packet, new RegExp(escapeRegExp(staleExecutionPath)));
 });
 
 test("request resume snapshot and packet pressure metadata persist across dispatch", async () => {

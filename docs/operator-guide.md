@@ -81,6 +81,10 @@ The App registration form does not store a user's Azure PAT. The PAT input is on
 
 The auto commit / draft PR checkbox is a user preference for the Local Worker flow. It does not allow merge PR, abandon PR, deploy, branch policy mutation, Work Item field mutation, or any Azure write that fails the control-plane guarded write policy.
 
+The default execution model is a Codex-style local workspace model. Each developer runs their own App, Local Worker, and `.control-plane` SQLite database on their machine. The worker directly operates on the selected repository path; it does not create `.codex-request-worktrees`. SourceTree, Codex, and the App therefore see the same branch and working tree. Because the selected repository has only one working tree, the App allows only one active request per worker and repository at a time.
+
+Before a new verified Work Item request starts branch preparation, the App checks the selected local workspace through the Local Launcher. If the workspace is not on `develop`, the App asks the operator to confirm switching back to `develop` and fetching the latest `origin/develop`. Dirty workspaces are blockers; the App and worker do not auto-stash, discard, merge, or rebase local changes.
+
 Repository discovery and Codex readiness are reported by the local worker started by the user's Local Launcher. The App does not scan the user's filesystem from the browser or depend on server-side directory scanning for the ordinary repository dropdown. `scripts/local-worker.mjs` scans candidate user folders on the developer's machine and posts repository candidates plus `codexReady / codexStatus / codexError / codexDiagnosticCode / codexExecutablePath` to `/api/workers/repositories`. When the user selects a repository from the worker-reported dropdown, the App saves that path on the worker record. Creating a request snapshots the selected repository onto the Request ID, and each queued Agent run stores the same repository snapshot so Agent0-3 execute in the original selected project even if the worker later switches to another repository.
 
 Worker runtime failures are separated from Agent blockers. Script hash or version mismatch is shown as `本機 Worker 版本不同步`; missing internal functions and worker-side `ReferenceError` failures are shown as `Worker 內部錯誤`. In both cases the user updates/restarts the Worker, then retries the same Agent. Dirty repo and merge-conflict blockers are shown as repo-state blockers with the affected git status, not as missing requirement evidence.
@@ -163,7 +167,7 @@ Not required for the MVP:
 
 Each request stores a delivery mode:
 
-- `draft_pr`: the default team delivery mode. Agent2 works from `origin/develop` on `feature/{workItemId}`, `bug/{workItemId}`, or `hotfix/{workItemId}` when a verified Azure Work Item is linked. Agent3 completion moves the request to PR Ready, then the App creates or refreshes the Draft Azure PR before the request is marked PR Created / Tracked.
+- `draft_pr`: the default team delivery mode. Agent2 works in the selected local repository path. For a verified Azure Work Item, the worker updates local `develop` from `origin/develop`, then checks out or creates `feature/{workItemId}`, `bug/{workItemId}`, or `hotfix/{workItemId}`. Agent3 reviews the same selected repository path. Agent3 completion moves the request to PR Ready, then the App creates or refreshes the Draft Azure PR before the request is marked PR Created / Tracked.
 - `no_pr`: for personal project changes or work that does not need PR publication. Agent0 through Agent3 still run, Agent3 still reviews the result, and the App marks the request delivered after Agent3 completes.
 
 The workflow may create a Draft Azure PR for a verified request branch. It does not merge, abandon, approve, deploy, update branch policy, or update Work Item fields.

@@ -185,7 +185,7 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
       reason:
         "這通常不是本機 develop 沒有拉到最新；阻擋點是正式 PR 分支尚未包含最新 base branch。",
       nextAction:
-        "到 Azure Repos 或列出的 worktree 更新 PR 分支，確認乾淨後重跑 Agent2。",
+        "到 Azure Repos 或列出的本機工作區更新 PR 分支，確認乾淨後重跑 Agent2。",
       original,
       kind: "pr_branch_outdated",
     };
@@ -204,7 +204,7 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
       reason:
         "Agent3 檢查到目前 branch、diff 或未核准變更含有非本需求內容，因此不能把這筆需求標成可發 PR。",
       nextAction:
-        "切到乾淨的需求分支或 request-scoped worktree，保留本需求變更後再重跑 Agent3。",
+        "切到乾淨的本機工作區需求分支，保留本需求變更後再重跑 Agent3。",
       original,
     };
   }
@@ -374,7 +374,7 @@ function summarizePrBranchOutdatedDiagnostic(
     reason:
       `不是本機 develop 沒更新。阻擋點是正式 PR 分支 ${sourceBranch} 尚未包含最新 ${baseBranch}。`,
     nextAction:
-      `到列出的 worktree 或 Azure Repos 更新 ${sourceBranch}，確認乾淨後重跑 Agent2。`,
+      `到列出的本機工作區或 Azure Repos 更新 ${sourceBranch}，確認乾淨後重跑 Agent2。`,
     original,
     kind: "pr_branch_outdated",
     details,

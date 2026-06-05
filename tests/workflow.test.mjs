@@ -572,7 +572,7 @@ test("blocker summaries explain outdated PR branches", () => {
         aheadCount: 1,
         behindCount: 45,
         worktreePath:
-          "C:\\Users\\MichaelChao\\Documents\\.codex-request-worktrees\\DOC-202605291754-top-menu-mj-source",
+          "C:\\Users\\MichaelChao\\Documents\\odin-mt5-web",
         changedFiles: [
           "apps/admin-agent-web/src/components/AgentTopBar.vue",
           "apps/admin-agent-web/src/styles/components/_topbar.scss",

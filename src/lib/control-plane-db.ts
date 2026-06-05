@@ -157,10 +157,25 @@ const SUPPORTED_IMAGE_CONTENT_TYPES = new Map([
   ["image/webp", ".webp"],
   ["image/gif", ".gif"],
 ]);
+const SINGLE_WORKING_TREE_ACTIVE_STAGES: WorkflowStage[] = [
+  "intake",
+  "dispatched",
+  "source_check",
+  "ready_for_implementation",
+  "running",
+  "review",
+  "blocked",
+  "pr_ready",
+];
 
 export function createRequest(input: WorkflowRequestInput) {
   const request = createWorkflowRequestFromInput(input);
   const db = getDatabase();
+  assertNoActiveRequestForRepo({
+    requestId: request.requestId,
+    workerId: request.assignedWorkerId,
+    repoPath: request.repoPath,
+  });
 
   db.prepare(
     `INSERT INTO workflow_requests (
@@ -179,11 +194,12 @@ export function createRequest(input: WorkflowRequestInput) {
       azure_reference_type,
       azure_reference_id,
       azure_reference_json,
+      branch_start_confirmed,
       analysis_json,
       resume_snapshot_json,
       created_at,
       updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     request.requestId,
     request.kind,
@@ -200,6 +216,7 @@ export function createRequest(input: WorkflowRequestInput) {
     request.azureReferenceType,
     request.azureReferenceId,
     JSON.stringify(request.azureReferenceEvidence),
+    request.branchStartConfirmed ? 1 : 0,
     JSON.stringify(request.interpretation),
     JSON.stringify(request.resumeSnapshot ?? {}),
     request.createdAt,
@@ -739,6 +756,11 @@ export function dispatchNextAgent(input: {
     throw new Error("No automatic next agent is available for this request.");
   }
   const repoPath = ensureRequestRepoPathSnapshot(request, worker);
+  assertNoActiveRequestForRepo({
+    requestId: request.requestId,
+    workerId: worker.workerId,
+    repoPath,
+  });
   const retryOfRunId = input.retryOfRunId?.trim() ?? "";
   const dispatchReason = normalizeDispatchReason(input.dispatchReason);
   const priorRun = retryOfRunId
@@ -805,11 +827,12 @@ export function dispatchNextAgent(input: {
         prior_handoff_count,
         used_resume_snapshot,
         is_retry_context,
+        branch_start_confirmed,
         created_at,
         started_at,
         completed_at,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, '', '', '', '', ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, '', '', '', '', ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
     )
     .run(
       runId,
@@ -824,6 +847,7 @@ export function dispatchNextAgent(input: {
       priorHandoffCount,
       usedResumeSnapshot ? 1 : 0,
       isRetryContext ? 1 : 0,
+      request.branchStartConfirmed ? 1 : 0,
       now,
       now,
     );
@@ -1350,6 +1374,52 @@ export function pollWorkerRun(workerId: string, token: string) {
   return pollWorker(workerId, token).run;
 }
 
+function assertNoActiveRequestForRepo(input: {
+  requestId: string;
+  workerId: string;
+  repoPath: string;
+}) {
+  const workerId = input.workerId.trim();
+  const repoPath = normalizeRepoPathForComparison(input.repoPath);
+  if (!workerId || !repoPath) {
+    return;
+  }
+
+  const rows = getDatabase()
+    .prepare(
+      `SELECT request_id, title, status, repo_path
+       FROM workflow_requests
+       WHERE assigned_worker_id = ?
+         AND request_id != ?
+         AND status IN (${SINGLE_WORKING_TREE_ACTIVE_STAGES.map(() => "?").join(", ")})
+       ORDER BY updated_at DESC
+       LIMIT 50`,
+    )
+    .all(
+      workerId,
+      input.requestId,
+      ...SINGLE_WORKING_TREE_ACTIVE_STAGES,
+    ) as Array<Record<string, unknown>>;
+  const conflict = rows.find(
+    (row) => normalizeRepoPathForComparison(row.repo_path) === repoPath,
+  );
+  if (!conflict) {
+    return;
+  }
+
+  throw new Error(
+    `This local workspace already has an active request (${String(conflict.request_id)}: ${String(conflict.title || "")}). Finish or stop the current request before starting another request in the same repository.`,
+  );
+}
+
+function normalizeRepoPathForComparison(value: unknown) {
+  return String(value ?? "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
 function ensureRequestRepoPathSnapshot(
   request: WorkflowRequest,
   worker: WorkerRegistration,
@@ -1379,14 +1449,9 @@ function resolveRunRepoPath(input: {
   requestRepoPath: string;
   runs: WorkerRun[];
 }) {
-  if (input.agentRole !== "agent3") {
-    return input.requestRepoPath;
-  }
-
-  const latestAgent2 = [...input.runs]
-    .reverse()
-    .find((run) => run.agentRole === "agent2" && run.status === "completed");
-  return latestAgent2?.repoPath.trim() || input.requestRepoPath;
+  void input.agentRole;
+  void input.runs;
+  return input.requestRepoPath;
 }
 
 export function pollWorker(workerId: string, token: string) {
@@ -1556,8 +1621,7 @@ export function heartbeatWorkerRun(
            SET updated_at = ?,
                progress_label = CASE WHEN ? != '' THEN ? ELSE progress_label END,
                progress_detail = CASE WHEN ? != '' THEN ? ELSE progress_detail END,
-               progress_updated_at = CASE WHEN ? != '' OR ? != '' THEN ? ELSE progress_updated_at END,
-               repo_path = CASE WHEN ? != '' THEN ? ELSE repo_path END
+               progress_updated_at = CASE WHEN ? != '' OR ? != '' THEN ? ELSE progress_updated_at END
            WHERE run_id = ?`
         : `UPDATE worker_runs SET updated_at = ? WHERE run_id = ?`,
     )
@@ -1572,8 +1636,6 @@ export function heartbeatWorkerRun(
             progressLabel,
             progressDetail,
             progressUpdatedAt,
-            executionRepoPath,
-            executionRepoPath,
             runId,
           ]
         : [now, runId]),
@@ -2235,6 +2297,7 @@ function getDatabase() {
       azure_reference_type TEXT NOT NULL,
       azure_reference_id TEXT NOT NULL,
       azure_reference_json TEXT NOT NULL DEFAULT '{}',
+      branch_start_confirmed INTEGER NOT NULL DEFAULT 0,
       analysis_json TEXT NOT NULL DEFAULT '{}',
       resume_snapshot_json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL,
@@ -2293,6 +2356,7 @@ function getDatabase() {
       prior_handoff_count INTEGER NOT NULL DEFAULT 0,
       used_resume_snapshot INTEGER NOT NULL DEFAULT 0,
       is_retry_context INTEGER NOT NULL DEFAULT 0,
+      branch_start_confirmed INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       started_at TEXT,
       completed_at TEXT,
@@ -2446,6 +2510,7 @@ function getDatabase() {
   ensureColumn(database, "workers", "readiness_check_requested_at", "TEXT");
   ensureColumn(database, "workers", "codex_setup_requested_at", "TEXT");
   ensureColumn(database, "workflow_requests", "resume_snapshot_json", "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(database, "workflow_requests", "branch_start_confirmed", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(database, "worker_runs", "repo_path", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, "worker_runs", "retry_of_run_id", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(database, "worker_runs", "progress_label", "TEXT NOT NULL DEFAULT ''");
@@ -2457,6 +2522,7 @@ function getDatabase() {
   ensureColumn(database, "worker_runs", "prior_handoff_count", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(database, "worker_runs", "used_resume_snapshot", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(database, "worker_runs", "is_retry_context", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(database, "worker_runs", "branch_start_confirmed", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(
     database,
     "worker_runs",
@@ -2498,6 +2564,7 @@ function mapRequestRow(row: unknown): WorkflowRequest {
       value.azure_reference_type as WorkflowRequest["azureReferenceType"],
       value.azure_reference_id,
     ),
+    branchStartConfirmed: Number(value.branch_start_confirmed ?? 0) === 1,
     interpretation: parseInterpretation(value.analysis_json, value.detail),
     resumeSnapshot: parseResumeSnapshot(value.resume_snapshot_json),
     createdAt: value.created_at,
@@ -2855,6 +2922,7 @@ function mapRunRow(row: unknown): WorkerRun {
     priorHandoffCount: Number(value.prior_handoff_count ?? 0),
     usedResumeSnapshot: Number(value.used_resume_snapshot ?? 0) === 1,
     isRetryContext: Number(value.is_retry_context ?? 0) === 1,
+    branchStartConfirmed: Number(value.branch_start_confirmed ?? 0) === 1,
     createdAt: String(value.created_at),
     startedAt: value.started_at ? String(value.started_at) : null,
     completedAt: value.completed_at ? String(value.completed_at) : null,

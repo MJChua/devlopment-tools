@@ -171,6 +171,7 @@ export type WorkflowRequestInput = {
   azureReferenceType: AzureReferenceType;
   azureReferenceId: string;
   azureReferenceEvidence?: Partial<AzureReferenceEvidence>;
+  branchStartConfirmed?: boolean;
   interpretation?: RequestInterpretation;
 };
 
@@ -198,6 +199,7 @@ export type WorkflowRequest = Required<
   evidenceMode: RequestEvidenceMode;
   templateId: RequestInputTemplateId;
   azureReferenceEvidence: AzureReferenceEvidence;
+  branchStartConfirmed: boolean;
   interpretation: RequestInterpretation;
   resumeSnapshot: WorkflowResumeSnapshot | null;
   requestId: string;
@@ -276,6 +278,7 @@ export type WorkerRun = {
   priorHandoffCount: number;
   usedResumeSnapshot: boolean;
   isRetryContext: boolean;
+  branchStartConfirmed: boolean;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -436,6 +439,7 @@ export function normalizeWorkflowRequestInput(
       azureReferenceType,
       azureReferenceId,
     ),
+    branchStartConfirmed: input.branchStartConfirmed === true,
     interpretation,
   };
 }
@@ -483,6 +487,7 @@ export function createWorkflowRequestFromInput(
     azureReferenceType,
     azureReferenceId,
     azureReferenceEvidence,
+    branchStartConfirmed: input.branchStartConfirmed === true,
     interpretation,
     resumeSnapshot: null,
     requestId: createRequestId(kind, title, createdAt),
@@ -1266,8 +1271,8 @@ function buildResumeSnapshotSection(
       ? `- Source Agent: ${formatAgentRole(snapshot.sourceAgentRole)}`
       : "- Source Agent: none",
     snapshot.executionRepoPath
-      ? `- Execution Repo / Worktree: ${snapshot.executionRepoPath}`
-      : "- Execution Repo / Worktree: not recorded",
+      ? `- Execution Repo: ${snapshot.executionRepoPath}`
+      : "- Execution Repo: not recorded",
     snapshot.prDeliveryTrace
       ? `- PR Delivery: ${formatPrDeliveryTrace(snapshot.prDeliveryTrace)}`
       : "- PR Delivery: not recorded",

@@ -166,6 +166,19 @@ async function handleRequest(request, response) {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/repository/status") {
+      const payload = await readJsonBody(request);
+      const workerId = String(payload.workerId || "").trim();
+      if (!workerId) {
+        throw new Error("workerId is required.");
+      }
+      const profile = await loadRequiredLauncherProfile(workerId);
+      const repoPath = String(payload.repoPath || profile.repoPath || "").trim();
+      const status = await readRepositoryStatus(repoPath);
+      sendJson(response, 200, status, corsHeaders);
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/refresh-worker") {
       const payload = await readJsonBody(request);
       const workerId = String(payload.workerId || "").trim();
@@ -273,6 +286,35 @@ async function callControlPlaneAzureApi(workerId, apiPath, payload) {
   }
 
   return data;
+}
+
+async function readRepositoryStatus(repoPath) {
+  if (!repoPath) {
+    throw new Error("repoPath is required.");
+  }
+
+  const root = await runGit(repoPath, ["rev-parse", "--show-toplevel"]);
+  if (root.exitCode !== 0) {
+    throw new Error(
+      `Selected workspace is not a Git repository: ${root.output.trim()}`,
+    );
+  }
+
+  const [branch, status, originDevelop] = await Promise.all([
+    runGit(repoPath, ["branch", "--show-current"]),
+    runGit(repoPath, ["status", "--porcelain"]),
+    runGit(repoPath, ["rev-parse", "--verify", "origin/develop"]),
+  ]);
+
+  return {
+    ok: true,
+    repoPath,
+    rootPath: root.output.trim(),
+    currentBranch: branch.exitCode === 0 ? branch.output.trim() : "",
+    dirty: status.exitCode === 0 && status.output.trim().length > 0,
+    hasOriginDevelop: originDevelop.exitCode === 0,
+    error: "",
+  };
 }
 
 async function startSavedProfiles() {
@@ -613,6 +655,29 @@ function runDetachedCommand(command, args) {
     });
     child.on("error", () => resolve());
     child.on("close", () => resolve());
+  });
+}
+
+function runGit(cwd, args) {
+  return new Promise((resolve) => {
+    const child = spawn("git", args, {
+      cwd,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout?.on("data", (chunk) => {
+      output += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", (chunk) => {
+      output += chunk.toString("utf8");
+    });
+    child.on("error", (error) => {
+      resolve({ exitCode: 1, output: error.message });
+    });
+    child.on("close", (exitCode) => {
+      resolve({ exitCode: exitCode ?? 0, output });
+    });
   });
 }
 

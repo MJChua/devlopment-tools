@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
@@ -590,14 +590,14 @@ async function prepareExecutionRepository(run, repoPath, progress) {
   }
 
   progress.setProgress(
-    "Preparing request worktree",
-    "Creating or reusing an isolated request-scoped worktree before Agent2.",
+    "Preparing local workspace",
+    "Preparing the selected repository branch before Agent2.",
   );
 
   const gitCheck = await runCommand("git rev-parse --show-toplevel", repoPath, {}, 15000);
   if (gitCheck.exitCode !== 0) {
     throw new Error(
-      `Cannot prepare request-scoped worktree because the selected repo is not a Git repository: ${gitCheck.output.trim()}`,
+      `Cannot prepare the selected local workspace because the selected repo is not a Git repository: ${gitCheck.output.trim()}`,
     );
   }
 
@@ -615,72 +615,53 @@ async function prepareExecutionRepository(run, repoPath, progress) {
       "Cannot prepare the team PR branch because this draft PR request has no verified Azure Work Item. Verify an Azure Work Item so the worker can use feature/{id}, bug/{id}, or hotfix/{id}.",
     );
   }
-  const baseRef = await resolveWorktreeBaseRef(repoPath, Boolean(trace.sourceBranch));
-  const worktreeRoot = path.join(path.dirname(repoPath), ".codex-request-worktrees");
-  const worktreePath = path.join(
-    worktreeRoot,
-    trace.sourceBranch
-      ? sanitizePathSegment(trace.sourceBranch.replaceAll("/", "-"))
-      : sanitizePathSegment(run.requestId),
-  );
-  await mkdir(worktreeRoot, { recursive: true });
 
-  const existingBranchWorktree = trace.sourceBranch
-    ? await findExistingWorktreeByBranch(repoPath, trace.sourceBranch)
-    : "";
-  if (existingBranchWorktree) {
-    await ensureCleanGitWorktree(
-      existingBranchWorktree,
-      `Cannot reuse ${trace.sourceBranch} because its worktree has uncommitted changes from an earlier run.`,
+  const currentBranch = await getCurrentBranch(repoPath);
+  if (
+    currentBranch &&
+    currentBranch !== "develop" &&
+    currentBranch !== branchName &&
+    !run.branchStartConfirmed
+  ) {
+    throw new Error(
+      `branch_start_confirmation_required: The selected local workspace is currently on ${currentBranch}. Confirm switching back to develop and fetching the latest origin/develop before rerunning Agent2.`,
     );
-    await ensurePrBranchIncludesDevelop(existingBranchWorktree, trace.sourceBranch);
-    return { repoPath: existingBranchWorktree };
   }
 
-  const existingWorktree = await findExistingWorktree(repoPath, worktreePath);
-  if (existingWorktree) {
-    await ensureCleanGitWorktree(
-      existingWorktree,
-      "Cannot reuse the request worktree because it has uncommitted changes from an earlier run.",
-    );
-    if (
-      trace.sourceBranch &&
-      !(await isWorktreeOnBranch(existingWorktree, trace.sourceBranch))
-    ) {
-      throw new Error(
-        `Cannot reuse ${worktreePath} because it is not on ${trace.sourceBranch}. Remove or move the stale request worktree, then rerun Agent2.`,
-      );
-    }
-    if (trace.sourceBranch) {
-      await ensurePrBranchIncludesDevelop(existingWorktree, trace.sourceBranch);
-    }
-    return { repoPath: existingWorktree };
-  }
-
+  const baseRef = await resolveSingleWorkingTreeBaseRef(repoPath, Boolean(trace.sourceBranch));
   const branchExists = await gitRefExists(repoPath, `refs/heads/${branchName}`);
   const remoteBranchExists = trace.sourceBranch
     ? await gitRefExists(repoPath, `refs/remotes/origin/${branchName}`)
     : false;
-  const addCommand = branchExists
-    ? `git worktree add ${quote(worktreePath)} ${quote(branchName)}`
-    : remoteBranchExists
-      ? `git worktree add -b ${quote(branchName)} ${quote(worktreePath)} ${quote(`origin/${branchName}`)}`
-      : `git worktree add -b ${quote(branchName)} ${quote(worktreePath)} ${quote(baseRef)}`;
-  const addResult = await runCommand(addCommand, repoPath, {}, 120000);
-  if (addResult.exitCode !== 0) {
-    throw new Error(
-      `Cannot prepare request-scoped worktree for ${run.requestId}: ${addResult.output.trim()}`,
+
+  if (currentBranch !== branchName) {
+    await checkoutLatestDevelop(repoPath);
+  }
+
+  if (branchExists) {
+    await runGitOrThrow(`git checkout ${quote(branchName)}`, repoPath, 120000);
+  } else if (remoteBranchExists) {
+    await runGitOrThrow(
+      `git checkout -b ${quote(branchName)} ${quote(`origin/${branchName}`)}`,
+      repoPath,
+      120000,
+    );
+  } else {
+    await runGitOrThrow(
+      `git checkout -b ${quote(branchName)} ${quote(baseRef)}`,
+      repoPath,
+      120000,
     );
   }
 
   if (trace.sourceBranch) {
-    await ensurePrBranchIncludesDevelop(worktreePath, trace.sourceBranch);
+    await ensurePrBranchIncludesDevelop(repoPath, trace.sourceBranch);
   }
 
-  return { repoPath: worktreePath };
+  return { repoPath };
 }
 
-async function resolveWorktreeBaseRef(repoPath, requireDevelop = false) {
+async function resolveSingleWorkingTreeBaseRef(repoPath, requireDevelop = false) {
   if (requireDevelop) {
     const result = await runCommand(
       "git rev-parse --verify origin/develop",
@@ -706,6 +687,38 @@ async function resolveWorktreeBaseRef(repoPath, requireDevelop = false) {
   return "HEAD";
 }
 
+async function getCurrentBranch(repoPath) {
+  const result = await runCommand("git branch --show-current", repoPath, {}, 15000);
+  if (result.exitCode !== 0) {
+    return "";
+  }
+
+  return result.output.trim();
+}
+
+async function checkoutLatestDevelop(repoPath) {
+  const originDevelop = await runCommand(
+    "git rev-parse --verify origin/develop",
+    repoPath,
+    {},
+    15000,
+  );
+  if (originDevelop.exitCode !== 0) {
+    throw new Error(
+      "Cannot prepare the formal PR branch because origin/develop was not found.",
+    );
+  }
+
+  const localDevelopExists = await gitRefExists(repoPath, "refs/heads/develop");
+  if (localDevelopExists) {
+    await runGitOrThrow("git checkout develop", repoPath, 120000);
+    await runGitOrThrow("git merge --ff-only origin/develop", repoPath, 120000);
+    return;
+  }
+
+  await runGitOrThrow("git checkout -b develop origin/develop", repoPath, 120000);
+}
+
 async function gitRefExists(repoPath, ref) {
   const result = await runCommand(
     `git show-ref --verify --quiet ${quote(ref)}`,
@@ -714,69 +727,6 @@ async function gitRefExists(repoPath, ref) {
     15000,
   );
   return result.exitCode === 0;
-}
-
-async function findExistingWorktree(repoPath, worktreePath) {
-  const result = await runCommand("git worktree list --porcelain", repoPath, {}, 15000);
-  if (result.exitCode !== 0) {
-    return "";
-  }
-
-  const normalizedTarget = path.resolve(worktreePath).toLowerCase();
-  const existing = parseCommandOutputLines(result.output)
-    .filter((line) => line.startsWith("worktree "))
-    .map((line) => line.slice("worktree ".length).trim())
-    .find((candidate) => path.resolve(candidate).toLowerCase() === normalizedTarget);
-  return existing || "";
-}
-
-async function findExistingWorktreeByBranch(repoPath, branchName) {
-  const worktrees = await listGitWorktrees(repoPath);
-  const match = worktrees.find((worktree) => worktree.branch === branchName);
-  return match?.path || "";
-}
-
-async function listGitWorktrees(repoPath) {
-  const result = await runCommand("git worktree list --porcelain", repoPath, {}, 15000);
-  if (result.exitCode !== 0) {
-    return [];
-  }
-
-  const worktrees = [];
-  let current = null;
-  for (const line of parseCommandOutputLines(result.output)) {
-    if (line.startsWith("worktree ")) {
-      if (current) {
-        worktrees.push(current);
-      }
-      current = { path: line.slice("worktree ".length).trim(), branch: "" };
-      continue;
-    }
-
-    if (current && line.startsWith("branch ")) {
-      current.branch = normalizeWorktreeBranch(line.slice("branch ".length));
-    }
-  }
-
-  if (current) {
-    worktrees.push(current);
-  }
-
-  return worktrees;
-}
-
-function normalizeWorktreeBranch(value) {
-  return String(value || "").trim().replace(/^refs\/heads\//, "");
-}
-
-async function isWorktreeOnBranch(worktreePath, branchName) {
-  const result = await runCommand(
-    "git rev-parse --abbrev-ref HEAD",
-    worktreePath,
-    {},
-    15000,
-  );
-  return result.exitCode === 0 && result.output.trim() === branchName;
 }
 
 async function ensurePrBranchIncludesDevelop(worktreePath, branchName) {
@@ -963,13 +913,6 @@ function sanitizeBranchSegment(value) {
     .replace(/\/+/g, "/")
     .replace(/^[-/]+|[-/]+$/g, "")
     .slice(0, 80);
-}
-
-function sanitizePathSegment(value) {
-  return String(value)
-    .replace(/[^a-zA-Z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 100);
 }
 
 function inferCommandProgress(chunkText) {
@@ -1217,7 +1160,7 @@ async function finalizeTeamPrDelivery(run, repoPath, progress) {
   }
   if (hasUnmergedStatus(status)) {
     throw new Error(
-      "Cannot commit and push because the request worktree has unresolved merge conflicts.",
+      "Cannot commit and push because the selected local workspace has unresolved merge conflicts.",
     );
   }
 
