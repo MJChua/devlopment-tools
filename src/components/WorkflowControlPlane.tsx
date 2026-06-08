@@ -2609,7 +2609,7 @@ export function WorkflowControlPlane() {
                   </span>
                 </label>
                 {workerForm.autoCommitAndPr ? (
-                  <>
+                  <div className="mt-3 flex flex-col gap-2">
                     <TextField
                       hideLabel
                       label="Azure access token"
@@ -2626,7 +2626,7 @@ export function WorkflowControlPlane() {
                       hasSavedPat={launcherState.hasAzurePat}
                       onClear={clearSavedAzurePat}
                     />
-                  </>
+                  </div>
                 ) : null}
               </SetupStep>
 
