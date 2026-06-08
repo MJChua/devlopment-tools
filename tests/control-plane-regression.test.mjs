@@ -490,6 +490,18 @@ test("blocker recovery exposes one rerun Agent action", () => {
   assert.doesNotMatch(blockerSource, /重跑同一 Agent/);
 });
 
+test("new request tab is blocked while the selected workspace has an active request", () => {
+  const source = readFileSync(
+    new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /blockNewRequestForActiveWorkspace/);
+  assert.match(source, /formatActiveRequestBlockMessage/);
+  assert.match(source, /tab === "new" && blockNewRequestForActiveWorkspace/);
+  assert.match(source, /onAbandon=\{abandonCurrentRequest\}/);
+});
+
 test("workflow dark mode keeps legacy utility colors readable", () => {
   const source = readFileSync(
     new URL("../src/app/globals.css", import.meta.url),
@@ -540,6 +552,18 @@ test("request-scoped PR create route refreshes existing Azure PR before creating
   assert.match(routeSource, /confirmWrite/);
   assert.match(routeSource, /isTeamPrDeliveryBranch/);
   assert.match(launcherSource, /pr-create/);
+});
+
+test("request abandon route uses audit-preserving helper and reports open runs as conflict", () => {
+  const routeSource = readFileSync(
+    new URL("../src/app/api/requests/[requestId]/abandon/route.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(routeSource, /abandonWorkflowRequest/);
+  assert.match(routeSource, /requestId/);
+  assert.match(routeSource, /queued or running/);
+  assert.match(routeSource, /status: message\.includes\("queued or running"\) \? 409 : 400/);
 });
 
 test("Work Item filter WIQL does not exclude states or types by default", () => {

@@ -112,6 +112,11 @@ export type RecoverWorkflowRequestInput = {
   actor?: string;
 };
 
+export type AbandonWorkflowRequestInput = {
+  requestId: string;
+  actor?: string;
+};
+
 export type CreateRequestAttachmentInput = {
   requestId: string;
   filename: string;
@@ -1075,6 +1080,46 @@ export function cancelWorkerRun(input: CancelWorkerRunInput) {
   );
 
   return requireRun(run.runId);
+}
+
+export function abandonWorkflowRequest(
+  input: AbandonWorkflowRequestInput,
+): WorkflowRequest {
+  const detail = getRequestDetail(input.requestId);
+  if (!detail) {
+    throw new Error("Request not found.");
+  }
+
+  if (detail.request.status === "abandoned") {
+    return detail.request;
+  }
+
+  const openRun = detail.runs.find(isOpenWorkerRun);
+  if (openRun) {
+    throw new Error(
+      "Cannot abandon this request while an Agent task is queued or running. Stop the current Agent first, then abandon the request.",
+    );
+  }
+
+  updateRequestStage(input.requestId, "abandoned");
+  appendAuditEvent(
+    input.requestId,
+    "request.abandoned",
+    "Request abandoned by operator.",
+    {
+      actor: input.actor ?? "control-plane",
+      metadata: {
+        previousStatus: detail.request.status,
+      },
+    },
+  );
+
+  const abandoned = getRequest(input.requestId);
+  if (!abandoned) {
+    throw new Error("Request not found.");
+  }
+
+  return abandoned;
 }
 
 function markWorkerRunCancelled(

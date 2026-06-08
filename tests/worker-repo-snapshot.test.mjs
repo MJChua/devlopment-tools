@@ -124,6 +124,120 @@ test("same worker and repo cannot start a second active request", async () => {
   );
 });
 
+test("abandoned request no longer blocks the same worker and repo", async () => {
+  const {
+    abandonWorkflowRequest,
+    createRequest,
+    getRequestDetail,
+    registerWorker,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+
+  const worker = registerWorker({
+    workerId: `worker-abandon-repo-${randomUUID()}`,
+    displayName: "Abandon Repo Worker",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = `C:\\workspace\\repo-abandon-${randomUUID()}`;
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "repo-abandon", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+
+  const first = createRequest({
+    title: `Abandoned request ${randomUUID()}`,
+    detail: "First request.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+    deliveryMode: "no_pr",
+  });
+
+  const abandoned = abandonWorkflowRequest({
+    requestId: first.requestId,
+    actor: "test",
+  });
+  assert.equal(abandoned.status, "abandoned");
+
+  const detail = getRequestDetail(first.requestId);
+  assert.equal(detail.request.status, "abandoned");
+  assert.ok(
+    detail.auditEvents.some(
+      (event) => event.eventType === "request.abandoned",
+    ),
+  );
+
+  assert.doesNotThrow(() =>
+    createRequest({
+      title: `Next request ${randomUUID()}`,
+      detail: "Second request.",
+      assignedWorkerId: worker.workerId,
+      repoPath,
+      azureReferenceType: "none",
+      azureReferenceId: "",
+      deliveryMode: "no_pr",
+    }),
+  );
+});
+
+test("request abandon rejects queued or running agent runs", async () => {
+  const {
+    abandonWorkflowRequest,
+    createRequest,
+    dispatchNextAgent,
+    registerWorker,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+
+  const worker = registerWorker({
+    workerId: `worker-abandon-open-${randomUUID()}`,
+    displayName: "Abandon Open Run Worker",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = `C:\\workspace\\repo-abandon-open-${randomUUID()}`;
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "repo-abandon-open", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+
+  const request = createRequest({
+    title: `Open run abandon ${randomUUID()}`,
+    detail: "Open run request.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    azureReferenceType: "none",
+    azureReferenceId: "",
+    deliveryMode: "no_pr",
+  });
+  dispatchNextAgent({ requestId: request.requestId });
+
+  assert.throws(
+    () => abandonWorkflowRequest({ requestId: request.requestId, actor: "test" }),
+    /queued or running/i,
+  );
+});
+
 test("no-PR workflow auto-dispatches through Agent3 and then delivers", async () => {
   const {
     completeWorkerRun,

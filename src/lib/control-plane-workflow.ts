@@ -30,6 +30,7 @@ export const WORKFLOW_STAGES = [
   "pr_ready",
   "pr_created",
   "delivered",
+  "abandoned",
   "blocked",
 ] as const;
 
@@ -2237,15 +2238,22 @@ export function evaluateWorkflowStageGate(
     });
   }
 
-  if (request.status === "delivered" || request.status === "pr_created") {
+  if (
+    request.status === "delivered" ||
+    request.status === "pr_created" ||
+    request.status === "abandoned"
+  ) {
     const isNoPrDelivery =
       request.status === "delivered" && request.deliveryMode === "no_pr";
+    const isAbandoned = request.status === "abandoned";
     return stageGateResult({
       status: "ready",
-      label: isNoPrDelivery ? "Delivered" : "Tracked",
-      summary: isNoPrDelivery
-        ? "Request was completed without PR after Agent3 review."
-        : `Request is ${request.status}.`,
+      label: isAbandoned ? "Abandoned" : isNoPrDelivery ? "Delivered" : "Tracked",
+      summary: isAbandoned
+        ? "Request was abandoned by the operator and no longer blocks this workspace."
+        : isNoPrDelivery
+          ? "Request was completed without PR after Agent3 review."
+          : `Request is ${request.status}.`,
       blockers,
       nextActions,
       humanDecisions,
@@ -2286,6 +2294,7 @@ export function formatWorkflowStage(stage: WorkflowStage) {
     pr_ready: "PR Ready",
     pr_created: "PR Created",
     delivered: "Delivered",
+    abandoned: "Abandoned",
     blocked: "Blocked",
   };
 

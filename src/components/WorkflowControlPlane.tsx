@@ -1557,7 +1557,25 @@ export function WorkflowControlPlane() {
     }));
   }
 
+  function blockNewRequestForActiveWorkspace(
+    blockingRequest = activeVisibleRequest,
+  ) {
+    if (!blockingRequest) {
+      return false;
+    }
+
+    setSelectedRequestId(blockingRequest.requestId);
+    setActiveWorkspaceTab("process");
+    setState("error");
+    setMessage(formatActiveRequestBlockMessage(blockingRequest));
+    return true;
+  }
+
   function startNewRequest() {
+    if (blockNewRequestForActiveWorkspace()) {
+      return;
+    }
+
     clearStagedAttachments();
     setSelectedRequestId("");
     setActiveWorkspaceTab("new");
@@ -1569,6 +1587,43 @@ export function WorkflowControlPlane() {
     setState("success");
     setMessage("已保留目前阻擋紀錄，並清空表單可建立新需求。");
     window.setTimeout(() => requestDetailRef.current?.focus(), 0);
+  }
+
+  async function abandonCurrentRequest() {
+    if (!selectedRequest) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `放棄目前需求 ${selectedRequest.requestId}？\n\n這只會結束控制台追蹤並釋放目前工作區，不會刪除 git branch、不會還原檔案，也不會修改 Azure PR。`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setState("loading");
+    setMessage("正在放棄目前需求...");
+
+    try {
+      const result = await fetchJson<{ request: WorkflowRequest }>(
+        `/api/requests/${selectedRequest.requestId}/abandon`,
+        {
+          method: "POST",
+          body: JSON.stringify({ actor: currentOwner }),
+        },
+      );
+      await refreshAll();
+      await refreshSelectedRequest(result.request.requestId);
+      setSelectedRequestId("");
+      setActiveWorkspaceTab("new");
+      setState("success");
+      setMessage(
+        `已放棄 ${result.request.requestId}，這個工作區現在可以新增需求。`,
+      );
+    } catch (error) {
+      setState("error");
+      setMessage(formatError(error));
+    }
   }
 
   function startAdjustmentRequest() {
@@ -2915,6 +2970,9 @@ export function WorkflowControlPlane() {
                 ).length
               }
               onChange={(tab) => {
+                if (tab === "new" && blockNewRequestForActiveWorkspace()) {
+                  return;
+                }
                 if (
                   tab === "process" &&
                   activeVisibleRequest &&
@@ -3186,6 +3244,11 @@ export function WorkflowControlPlane() {
                 />
                 {stageGate ? (
                   <BlockerRecoveryPanel
+                    canAbandon={Boolean(
+                      selectedRequest &&
+                        isActiveWorkflowStage(selectedRequest.status) &&
+                        !openRun,
+                    )}
                     latestRun={latestRun}
                     loading={state === "loading"}
                     note={recoveryNote}
@@ -3195,6 +3258,7 @@ export function WorkflowControlPlane() {
                     stageGate={stageGate}
                     worker={selectedWorker}
                     onChangeNote={setSelectedRecoveryNote}
+                    onAbandon={abandonCurrentRequest}
                     onOpenQuickClarification={openQuickClarificationDialog}
                     onPasteAttachment={handleRecoveryNotePaste}
                     onRefreshWorker={() =>
@@ -4082,6 +4146,7 @@ function RecoveryControls({
 }
 
 function BlockerRecoveryPanel({
+  canAbandon,
   latestRun,
   loading,
   note,
@@ -4091,6 +4156,7 @@ function BlockerRecoveryPanel({
   stageGate,
   worker,
   launcherHasProfile,
+  onAbandon,
   onChangeNote,
   onOpenQuickClarification,
   onPasteAttachment,
@@ -4104,6 +4170,7 @@ function BlockerRecoveryPanel({
   onSyncOutput,
   workerRefreshing,
 }: {
+  canAbandon: boolean;
   latestRun: WorkerRunView | null;
   loading: boolean;
   note: string;
@@ -4112,6 +4179,7 @@ function BlockerRecoveryPanel({
   runs: WorkerRunView[];
   stageGate: StageGateResult;
   worker: WorkerRegistration | null;
+  onAbandon: () => void;
   onChangeNote: (value: string) => void;
   onOpenQuickClarification: () => void;
   onPasteAttachment: (event: ClipboardEvent<HTMLTextAreaElement>) => void;
@@ -4467,6 +4535,22 @@ function BlockerRecoveryPanel({
             停止目前 Agent
           </Button>
         ) : null}
+        {canAbandon ? (
+          <Button
+            className="gap-2"
+            disabled={loading}
+            onClick={onAbandon}
+            type="button"
+            variant="outline"
+          >
+            {loading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <X className="h-4 w-4" />
+            )}
+            放棄目前需求
+          </Button>
+        ) : null}
         <Button
           className="gap-2"
           disabled={loading}
@@ -4522,6 +4606,12 @@ function ToastHost({
       {message}
     </div>
   );
+}
+
+function formatActiveRequestBlockMessage(request: WorkflowRequest) {
+  return `這個工作區還有未完成需求 ${request.requestId}（${formatUiWorkflowStage(
+    request.status,
+  )}：${formatRequestDisplayTitle(request)}）。請先處理或放棄目前需求，才能新增。`;
 }
 
 function formatRequestDisplayTitle(request: WorkflowRequest) {
@@ -5443,7 +5533,8 @@ function StageBadge({
   stage: WorkflowRequest["status"];
 }) {
   const isBlocked = stage === "blocked";
-  const isReady = stage === "pr_ready" || stage === "delivered";
+  const isReady =
+    stage === "pr_ready" || stage === "delivered" || stage === "abandoned";
 
   return (
     <span
@@ -6696,7 +6787,7 @@ function formatWorkerRunStatus(status: WorkerRunView["status"]) {
 }
 
 function formatUiWorkflowStage(stage: WorkflowRequest["status"]) {
-  const labels: Record<WorkflowRequest["status"], string> = {
+  const labels: Partial<Record<WorkflowRequest["status"], string>> = {
     intake: "需求輸入",
     dispatched: "已派工",
     source_check: "來源確認",
@@ -6709,7 +6800,7 @@ function formatUiWorkflowStage(stage: WorkflowRequest["status"]) {
     blocked: "已阻擋",
   };
 
-  return labels[stage];
+  return labels[stage] ?? "已放棄";
 }
 
 function formatPrDiscoveryStatus(status: PrDeliveryTrace["discoveryStatus"]) {
