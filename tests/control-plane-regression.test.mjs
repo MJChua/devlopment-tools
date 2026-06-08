@@ -95,9 +95,30 @@ test("single working tree mode replaces request worktree branch preparation", ()
   assert.match(workerSource, /Preparing local workspace/);
   assert.match(workerSource, /branch_start_confirmation_required/);
   assert.match(workerSource, /checkoutLatestDevelop/);
+  assert.match(workerSource, /run\.agentRole === "agent0"/);
+  assert.match(workerSource, /tryPrepareLegacyAgent2Branch/);
+  assert.match(workerSource, /ensureScopedDirtyWorktree/);
+  assert.match(workerSource, /findUnauthorizedGitStatusEntries/);
+  assert.match(workerSource, /Cannot commit and push because the selected local workspace has uncommitted changes outside Agent1 allowed files/);
+  assert.match(workerSource, /git_remote_unreachable/);
   assert.match(launcherSource, /\/repository\/status/);
+  assert.match(launcherSource, /includeRemoteCheck/);
+  assert.match(launcherSource, /ls-remote/);
+  assert.match(
+    launcherSource,
+    /options\.includeRemoteCheck === true && !dirty && hasOriginDevelop/,
+  );
   assert.match(uiSource, /BranchStartConfirmationDialog/);
   assert.match(uiSource, /branchStartConfirmed/);
+  assert.match(uiSource, /includeRemoteCheck: true/);
+  assert.match(uiSource, /formatGitRemotePreflightBlocker/);
+  assert.match(uiSource, /formatRepositoryRemoteStatus/);
+  assert.match(
+    uiSource,
+    /repoStatus\.dirty[\s\S]*!repoStatus\.hasOriginDevelop[\s\S]*repoStatus\.remote\?\.status === "blocked"[\s\S]*currentBranch !== "develop"/,
+  );
+  assert.match(uiSource, /currentBranch !== "develop"/);
+  assert.match(uiSource, /currentBranch !== prDeliveryTrace\.sourceBranch/);
 });
 
 test("testing-stage write policy allows only AITraining source branches", () => {

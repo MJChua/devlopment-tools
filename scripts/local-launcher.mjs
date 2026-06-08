@@ -10,6 +10,10 @@ import {
   LOCAL_LAUNCHER_VERSION,
   WORKER_MANIFEST_FILE,
   applyWorkerManifestToProfile,
+  GIT_REMOTE_CHECK_TIMEOUT_MS,
+  GIT_REMOTE_DEVELOP_REF,
+  buildGitRemoteCheckEnv,
+  buildGitRemoteDiagnostic,
   buildCorsHeaders,
   buildControlPlaneAzureRequestBody,
   buildLauncherWorkerStatus,
@@ -174,7 +178,9 @@ async function handleRequest(request, response) {
       }
       const profile = await loadRequiredLauncherProfile(workerId);
       const repoPath = String(payload.repoPath || profile.repoPath || "").trim();
-      const status = await readRepositoryStatus(repoPath);
+      const status = await readRepositoryStatus(repoPath, {
+        includeRemoteCheck: payload.includeRemoteCheck === true,
+      });
       sendJson(response, 200, status, corsHeaders);
       return;
     }
@@ -288,7 +294,7 @@ async function callControlPlaneAzureApi(workerId, apiPath, payload) {
   return data;
 }
 
-async function readRepositoryStatus(repoPath) {
+async function readRepositoryStatus(repoPath, options = {}) {
   if (!repoPath) {
     throw new Error("repoPath is required.");
   }
@@ -300,19 +306,43 @@ async function readRepositoryStatus(repoPath) {
     );
   }
 
-  const [branch, status, originDevelop] = await Promise.all([
+  const [branch, status, originDevelop, originUrlResult] = await Promise.all([
     runGit(repoPath, ["branch", "--show-current"]),
     runGit(repoPath, ["status", "--porcelain"]),
     runGit(repoPath, ["rev-parse", "--verify", "origin/develop"]),
+    runGit(repoPath, ["config", "--get", "remote.origin.url"]),
   ]);
+  const dirty = status.exitCode === 0 && status.output.trim().length > 0;
+  const hasOriginDevelop = originDevelop.exitCode === 0;
+  const originUrl =
+    originUrlResult.exitCode === 0 ? originUrlResult.output.trim() : "";
+  let remote = buildGitRemoteDiagnostic({ originUrl, skipped: true });
+
+  if (options.includeRemoteCheck === true && !dirty && hasOriginDevelop) {
+    const remoteCheck = await runGit(
+      repoPath,
+      ["ls-remote", "--exit-code", "origin", GIT_REMOTE_DEVELOP_REF],
+      {
+        env: buildGitRemoteCheckEnv(originUrl),
+        timeoutMs: GIT_REMOTE_CHECK_TIMEOUT_MS,
+      },
+    );
+    remote = buildGitRemoteDiagnostic({
+      originUrl,
+      output: remoteCheck.output,
+      exitCode: remoteCheck.exitCode,
+      timedOut: remoteCheck.timedOut,
+    });
+  }
 
   return {
     ok: true,
     repoPath,
     rootPath: root.output.trim(),
     currentBranch: branch.exitCode === 0 ? branch.output.trim() : "",
-    dirty: status.exitCode === 0 && status.output.trim().length > 0,
-    hasOriginDevelop: originDevelop.exitCode === 0,
+    dirty,
+    hasOriginDevelop,
+    remote,
     error: "",
   };
 }
@@ -658,14 +688,26 @@ function runDetachedCommand(command, args) {
   });
 }
 
-function runGit(cwd, args) {
+function runGit(cwd, args, options = {}) {
   return new Promise((resolve) => {
+    let closed = false;
+    let timedOut = false;
     const child = spawn("git", args, {
       cwd,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
+      env: options.env ? { ...process.env, ...options.env } : process.env,
     });
     let output = "";
+    const timeoutMs = Number(options.timeoutMs || 0);
+    const timeout = timeoutMs
+      ? setTimeout(() => {
+          timedOut = true;
+          output += `\ngit ${args.join(" ")} timed out after ${timeoutMs}ms.`;
+          child.kill("SIGTERM");
+        }, timeoutMs)
+      : null;
+    timeout?.unref?.();
     child.stdout?.on("data", (chunk) => {
       output += chunk.toString("utf8");
     });
@@ -673,10 +715,24 @@ function runGit(cwd, args) {
       output += chunk.toString("utf8");
     });
     child.on("error", (error) => {
-      resolve({ exitCode: 1, output: error.message });
+      if (closed) {
+        return;
+      }
+      closed = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      resolve({ exitCode: 1, output: error.message, timedOut });
     });
     child.on("close", (exitCode) => {
-      resolve({ exitCode: exitCode ?? 0, output });
+      if (closed) {
+        return;
+      }
+      closed = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      resolve({ exitCode: exitCode ?? 0, output, timedOut });
     });
   });
 }

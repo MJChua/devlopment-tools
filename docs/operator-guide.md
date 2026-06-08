@@ -169,10 +169,12 @@ Not required for the MVP:
 
 Each request stores a delivery mode:
 
-- `draft_pr`: the default team delivery mode. Agent2 works in the selected local repository path. For a verified Azure Work Item, the worker updates local `develop` from `origin/develop`, then checks out or creates `feature/{workItemId}`, `bug/{workItemId}`, or `hotfix/{workItemId}`. Agent3 reviews the same selected repository path. Agent3 completion moves the request to PR Ready, then the App creates or refreshes the Draft Azure PR before the request is marked PR Created / Tracked.
+- `draft_pr`: the default team delivery mode. For a verified Azure Work Item, the worker prepares the formal request branch before the first Agent run by fetching `origin`, updating local `develop` from `origin/develop`, then checking out or creating `feature/{workItemId}`, `bug/{workItemId}`, or `hotfix/{workItemId}`. Agent1 may leave request-owned source evidence files on that branch. Before Agent2 starts or auto-commits, the worker allows only dirty files that match Agent1's Allowed Files and blocks unrelated dirty files or merge conflicts. Agent3 reviews the same selected repository path. Agent3 completion moves the request to PR Ready, then the App creates or refreshes the Draft Azure PR before the request is marked PR Created / Tracked.
 - `no_pr`: for personal project changes or work that does not need PR publication. Agent0 through Agent3 still run, Agent3 still reviews the result, and the App marks the request delivered after Agent3 completes.
 
 The workflow may create a Draft Azure PR for a verified request branch. It does not merge, abandon, approve, deploy, update branch policy, or update Work Item fields.
+
+For `draft_pr` requests with a verified Work Item, request submission performs a read-only Git remote preflight before the request is created. The check is separate from Local Worker heartbeat and Codex readiness: a worker can be connected while `git fetch origin` is still blocked by SSH, VPN, firewall, or Git credential problems. If `origin/develop` is clean locally but `git ls-remote --exit-code origin refs/heads/develop` fails, the App blocks submission and reports `git_remote_unreachable`. SSH remotes use `BatchMode` with a short connect timeout so `ssh.dev.azure.com:22` timeouts are surfaced before Agent0 starts. The App never changes `git remote set-url`; switching a repository from SSH to HTTPS is a manual operator action.
 
 ## Natural-Language Request Intake
 
@@ -223,6 +225,7 @@ The App evaluates workflow status automatically and refreshes selected request p
 - Missing worker.
 - High-risk request signal.
 - Worker failed or blocked.
+- Git remote cannot be reached for formal PR branch preparation.
 - Azure PR write approval required.
 - No automatic next workflow step.
 

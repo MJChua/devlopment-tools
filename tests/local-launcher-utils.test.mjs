@@ -7,10 +7,14 @@ import test from "node:test";
 const {
   buildCorsHeaders,
   buildControlPlaneAzureRequestBody,
+  buildGitRemoteCheckEnv,
+  buildGitRemoteDiagnostic,
   buildLauncherWorkerStatus,
   buildWorkerEnvironment,
+  classifyGitRemoteError,
   clearLauncherProfilePat,
   deleteLauncherProfile,
+  GIT_REMOTE_DEVELOP_REF,
   getLauncherPaths,
   isWorkerManifestCurrent,
   listLauncherProfiles,
@@ -20,6 +24,7 @@ const {
   applyWorkerManifestToProfile,
   normalizeWorkerBootstrapManifest,
   normalizeConnectPayload,
+  parseGitRemoteUrl,
   redactProfile,
   saveLauncherProfile,
 } = await import("../scripts/local-launcher-utils.mjs");
@@ -82,6 +87,84 @@ test("launcher CORS allows configured app origin and blocks unknown origins", ()
   assert.equal(blocked, null);
 });
 
+test("launcher git remote utilities parse Azure SSH and HTTPS remotes", () => {
+  assert.deepEqual(
+    parseGitRemoteUrl("git@ssh.dev.azure.com:v3/odin-tech/MT5-Trading-Platform/odin-mt5-web"),
+    {
+      originUrl:
+        "git@ssh.dev.azure.com:v3/odin-tech/MT5-Trading-Platform/odin-mt5-web",
+      protocol: "ssh",
+      host: "ssh.dev.azure.com",
+      port: 22,
+      targetRef: GIT_REMOTE_DEVELOP_REF,
+    },
+  );
+  assert.deepEqual(
+    parseGitRemoteUrl("https://dev.azure.com/odin-tech/MT5-Trading-Platform/_git/odin-mt5-web"),
+    {
+      originUrl:
+        "https://dev.azure.com/odin-tech/MT5-Trading-Platform/_git/odin-mt5-web",
+      protocol: "https",
+      host: "dev.azure.com",
+      port: 443,
+      targetRef: GIT_REMOTE_DEVELOP_REF,
+    },
+  );
+  assert.equal(
+    buildGitRemoteCheckEnv("git@ssh.dev.azure.com:v3/org/project/repo")
+      .GIT_SSH_COMMAND,
+    "ssh -o BatchMode=yes -o ConnectTimeout=10",
+  );
+  assert.equal(
+    buildGitRemoteCheckEnv("https://dev.azure.com/org/project/_git/repo")
+      .GIT_TERMINAL_PROMPT,
+    "0",
+  );
+});
+
+test("launcher git remote utilities classify remote check failures", () => {
+  assert.equal(
+    classifyGitRemoteError(
+      "ssh: connect to host ssh.dev.azure.com port 22: Connection timed out",
+    ),
+    "network_timeout",
+  );
+  assert.equal(
+    classifyGitRemoteError("Permission denied (publickey)."),
+    "auth_failed",
+  );
+  assert.equal(
+    classifyGitRemoteError("ssh: Could not resolve hostname ssh.dev.azure.com"),
+    "dns_failed",
+  );
+  assert.equal(
+    buildGitRemoteDiagnostic({
+      originUrl: "",
+      output: "",
+      exitCode: 1,
+    }).reason,
+    "missing_origin",
+  );
+  assert.deepEqual(
+    buildGitRemoteDiagnostic({
+      originUrl: "git@ssh.dev.azure.com:v3/org/project/repo",
+      output: "Connection timed out",
+      exitCode: 124,
+      timedOut: true,
+    }),
+    {
+      originUrl: "git@ssh.dev.azure.com:v3/org/project/repo",
+      protocol: "ssh",
+      host: "ssh.dev.azure.com",
+      port: 22,
+      targetRef: GIT_REMOTE_DEVELOP_REF,
+      status: "blocked",
+      reason: "network_timeout",
+      error: "Connection timed out",
+    },
+  );
+});
+
 test("launcher config reports scheduled-task install metadata", async () => {
   const tempDir = await mkdtemp(path.join(tmpdir(), "launcher-config-"));
   const paths = getLauncherPaths(tempDir);
@@ -138,7 +221,7 @@ test("launcher worker environment preserves runtime inputs without logging secre
     WORKER_ID: "worker",
     WORKER_TOKEN: "cw_token",
     CODEX_SANDBOX_MODE: "workspace-write",
-    CONTROL_PLANE_LAUNCHER_VERSION: "0.2.1",
+    CONTROL_PLANE_LAUNCHER_VERSION: "0.2.2",
     REPO_PATH: "C:\\repo",
     AZURE_DEVOPS_PAT: "secret-pat",
     CONTROL_PLANE_AUTO_COMMIT_PR: "1",
@@ -367,7 +450,7 @@ test("launcher profile PAT clear preserves non-secret worker settings", async ()
     WORKER_ID: "worker-clear-pat",
     WORKER_TOKEN: "token",
     CODEX_SANDBOX_MODE: "danger-full-access",
-    CONTROL_PLANE_LAUNCHER_VERSION: "0.2.1",
+    CONTROL_PLANE_LAUNCHER_VERSION: "0.2.2",
     REPO_PATH: "C:\\repo",
     CONTROL_PLANE_AUTO_COMMIT_PR: "1",
   });

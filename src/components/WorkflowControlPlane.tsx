@@ -210,6 +210,23 @@ type LocalLauncherRepositoryStatus = {
   currentBranch: string;
   dirty: boolean;
   hasOriginDevelop: boolean;
+  remote: {
+    originUrl: string;
+    protocol: "ssh" | "https" | "other" | "missing";
+    host: string;
+    port: number | null;
+    targetRef: "refs/heads/develop";
+    status: "ok" | "blocked" | "skipped";
+    reason:
+      | ""
+      | "network_timeout"
+      | "connection_refused"
+      | "dns_failed"
+      | "auth_failed"
+      | "missing_origin"
+      | "unknown";
+    error: string;
+  };
   error: string;
 };
 
@@ -383,6 +400,8 @@ export function WorkflowControlPlane() {
     useState<WorkerRegistrationWithToken | null>(null);
   const [repoCandidates, setRepoCandidates] = useState<RepositoryCandidate[]>([]);
   const [repoScanState, setRepoScanState] = useState<LoadState>("idle");
+  const [lastRepositoryStatus, setLastRepositoryStatus] =
+    useState<LocalLauncherRepositoryStatus | null>(null);
   const [workItemCandidates, setWorkItemCandidates] = useState<
     WorkItemCandidate[]
   >([]);
@@ -1818,9 +1837,11 @@ export function WorkflowControlPlane() {
             body: JSON.stringify({
               workerId: assignedWorkerId,
               repoPath: selectedRepoPath,
+              includeRemoteCheck: true,
             }),
           },
         );
+        setLastRepositoryStatus(repoStatus);
         if (repoStatus.dirty) {
           throw new Error(
             "目前本機工作區有未提交變更。請先 commit、stash 或 discard 後再建立新需求。",
@@ -1830,6 +1851,9 @@ export function WorkflowControlPlane() {
           throw new Error(
             "目前本機工作區找不到 origin/develop，無法從最新 develop 建立需求分支。",
           );
+        }
+        if (repoStatus.remote?.status === "blocked") {
+          throw new Error(formatGitRemotePreflightBlocker(repoStatus.remote));
         }
         const currentBranch = repoStatus.currentBranch || "detached HEAD";
         if (
@@ -2561,6 +2585,7 @@ export function WorkflowControlPlane() {
   }
 
   async function selectRepository(repoPath: string) {
+    setLastRepositoryStatus(null);
     setWorkerForm((current) => ({ ...current, repoPath }));
     if (!currentWorker) {
       return;
@@ -2595,6 +2620,7 @@ export function WorkflowControlPlane() {
           connectionInfo={connectionInfo}
           openRun={openRun}
           realtimeStatus={realtimeStatus}
+          repositoryStatus={lastRepositoryStatus}
           repoName={selectedRepoName}
           worker={currentWorker}
           onOpenSettings={() => setSetupDialogRequested(true)}
@@ -3775,6 +3801,7 @@ function ConnectionStatusEntry({
   connectionInfo,
   openRun,
   realtimeStatus,
+  repositoryStatus,
   repoName,
   worker,
   onOpenSettings,
@@ -3784,6 +3811,7 @@ function ConnectionStatusEntry({
   connectionInfo: WorkerConnectionInfo;
   openRun: WorkerRunView | null;
   realtimeStatus: RealtimeConnectionStatus;
+  repositoryStatus: LocalLauncherRepositoryStatus | null;
   repoName: string;
   worker: WorkerRegistration | null;
   onOpenSettings: () => void;
@@ -3827,6 +3855,28 @@ function ConnectionStatusEntry({
     canUseWorkflow && realtimeStatus !== "connected"
       ? "即時通道暫時不穩，App 會降低刷新頻率並維持背景同步。"
       : detailText;
+  const statusRows = [
+    {
+      label: "Worker",
+      value: workerIsFresh ? "Connected" : "Not fresh",
+    },
+    {
+      label: "Codex",
+      value: worker?.codexReady ? "Ready" : "Not ready",
+    },
+    {
+      label: "Repo",
+      value: canUseWorkflow
+        ? repoName
+        : connectionInfo.ready
+          ? "Not selected"
+          : "Not ready",
+    },
+    {
+      label: "Git remote",
+      value: formatRepositoryRemoteStatus(repositoryStatus),
+    },
+  ];
   const [open, setOpen] = useState(false);
 
   function openSettings() {
@@ -3874,6 +3924,19 @@ function ConnectionStatusEntry({
           >
             {actionLabel}
           </Button>
+        </div>
+        <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+          {statusRows.map((row) => (
+            <div
+              className="min-w-0 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5"
+              key={row.label}
+            >
+              <div className="font-semibold text-slate-500">{row.label}</div>
+              <div className="mt-0.5 truncate font-semibold text-slate-900">
+                {row.value}
+              </div>
+            </div>
+          ))}
         </div>
         {showDiagnostics ? (
           <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
@@ -4230,9 +4293,12 @@ function BlockerRecoveryPanel({
   const workerVersionMismatch =
     stageGate.recoveryKind === "worker_version_mismatch" ||
     stageGate.recoveryKind === "worker_runtime_error";
+  const gitRemoteUnreachable =
+    stageGate.recoveryKind === "git_remote_unreachable";
   const prBranchOutdated = stageGate.recoveryKind === "pr_branch_outdated";
   const showDiagnostics =
     prBranchOutdated ||
+    gitRemoteUnreachable ||
     stageGate.recoveryKind === "stale_run" ||
     stageGate.recoveryKind === "handoff_schema" ||
     workerOffline ||
@@ -4401,6 +4467,17 @@ function BlockerRecoveryPanel({
             )}
             更新並重啟 Worker
           </Button>
+        </div>
+      ) : null}
+
+      {gitRemoteUnreachable ? (
+        <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-900">
+          <div className="font-semibold">Git remote is not reachable</div>
+          <ul className="mt-2 list-disc space-y-1 pl-5">
+            <li>Local Worker heartbeat can be healthy while Git fetch is blocked.</li>
+            <li>Check VPN, firewall, SSH key, or saved Git credentials.</li>
+            <li>If SSH port 22 is blocked, switch the repository remote to HTTPS manually and rerun the same Agent.</li>
+          </ul>
         </div>
       ) : null}
 
@@ -6846,6 +6923,38 @@ function formatAzureReferenceEvidenceBadge(request: WorkflowRequest) {
   return `Azure #${request.azureReferenceId} tracking only`;
 }
 
+function formatGitRemotePreflightBlocker(
+  remote: LocalLauncherRepositoryStatus["remote"],
+) {
+  const endpoint = formatGitRemoteEndpoint(remote);
+  const reason = remote.reason || "unknown";
+  const detail = remote.error ? ` Detail: ${remote.error}` : "";
+  return `Local Worker is connected, but Git remote cannot read ${remote.targetRef} from origin${endpoint ? ` (${endpoint})` : ""}. Reason: ${reason}. Fix VPN/firewall/SSH key/credentials, or manually switch this repository remote to HTTPS, then submit again.${detail}`;
+}
+
+function formatRepositoryRemoteStatus(
+  status: LocalLauncherRepositoryStatus | null,
+) {
+  if (!status?.remote || status.remote.status === "skipped") {
+    return "Not checked";
+  }
+
+  if (status.remote.status === "ok") {
+    return "Reachable";
+  }
+
+  const endpoint = formatGitRemoteEndpoint(status.remote);
+  return `Blocked${endpoint ? ` / ${endpoint}` : ""}`;
+}
+
+function formatGitRemoteEndpoint(remote: LocalLauncherRepositoryStatus["remote"]) {
+  if (!remote.host) {
+    return "";
+  }
+
+  return remote.port ? `${remote.host}:${remote.port}` : remote.host;
+}
+
 function formatLauncherStatus(launcherState: LocalLauncherState) {
   if (!launcherState.available) {
     return "尚未偵測到本機 Launcher。";
@@ -6911,6 +7020,10 @@ function formatRecoveryPanelSummary(stageGate: StageGateResult) {
     return "本機 repo 有未提交異動或分支衝突。";
   }
 
+  if (stageGate.recoveryKind === "git_remote_unreachable") {
+    return "Local Worker is connected, but Git remote origin cannot be read.";
+  }
+
   if (stageGate.needsClarification) {
     return "重跑 Agent；若有補充內容會一併帶入。";
   }
@@ -6948,6 +7061,10 @@ function formatRecoveryNextStep(stageGate: StageGateResult) {
 
   if (stageGate.recoveryKind === "repo_dirty_blocked") {
     return "處理 repo 狀態";
+  }
+
+  if (stageGate.recoveryKind === "git_remote_unreachable") {
+    return "Fix Git remote";
   }
 
   if (stageGate.canManualRetry) {

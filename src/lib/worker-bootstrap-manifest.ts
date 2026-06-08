@@ -7,7 +7,7 @@ export const WORKER_BOOTSTRAP_SCRIPT_FILES = [
   "local-worker.mjs",
   "local-worker-utils.mjs",
 ] as const;
-export const LAUNCHER_BOOTSTRAP_VERSION = "0.2.1";
+export const LAUNCHER_BOOTSTRAP_VERSION = "0.2.2";
 export const LAUNCHER_BOOTSTRAP_SCRIPT_FILES = [
   "local-launcher.mjs",
   "local-launcher-utils.mjs",

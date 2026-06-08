@@ -6,7 +6,101 @@ const {
   buildCodexReadinessError,
   decodeCommandBuffer,
   diagnoseCodexReadiness,
+  findUnauthorizedGitStatusEntries,
+  gitPathMatchesAllowedPattern,
+  hasUnmergedGitStatus,
+  normalizeAllowedFilePatterns,
+  parseGitStatusPorcelainEntries,
 } = await import("../scripts/local-worker-utils.mjs");
+
+test("git porcelain parser extracts modified, untracked, and renamed paths", () => {
+  const entries = parseGitStatusPorcelainEntries(
+    [
+      " M docs/ai/tasks/ADO-876.md",
+      "?? docs/ai/tasks/raw/ADO-876-work-item.json",
+      "R  old/path.ts -> src/new/path.ts",
+    ].join("\n"),
+  );
+
+  assert.deepEqual(entries, [
+    {
+      raw: "M docs/ai/tasks/ADO-876.md",
+      status: " M",
+      paths: ["docs/ai/tasks/ADO-876.md"],
+    },
+    {
+      raw: "?? docs/ai/tasks/raw/ADO-876-work-item.json",
+      status: "??",
+      paths: ["docs/ai/tasks/raw/ADO-876-work-item.json"],
+    },
+    {
+      raw: "R  old/path.ts -> src/new/path.ts",
+      status: "R ",
+      paths: ["old/path.ts", "src/new/path.ts"],
+    },
+  ]);
+});
+
+test("allowed file pattern matching supports exact paths, directories, and wildcards", () => {
+  const patterns = normalizeAllowedFilePatterns([
+    "`docs/ai/tasks/ADO-876.md`",
+    "docs/ai/tasks/raw/",
+    "apps/admin-hq-web/src/**/*.vue",
+  ]);
+
+  assert.deepEqual(patterns, [
+    "docs/ai/tasks/ADO-876.md",
+    "docs/ai/tasks/raw/",
+    "apps/admin-hq-web/src/**/*.vue",
+  ]);
+  assert.equal(
+    gitPathMatchesAllowedPattern(
+      "docs/ai/tasks/ADO-876.md",
+      "docs/ai/tasks/ADO-876.md",
+    ),
+    true,
+  );
+  assert.equal(
+    gitPathMatchesAllowedPattern(
+      "docs/ai/tasks/raw/source.json",
+      "docs/ai/tasks/raw/",
+    ),
+    true,
+  );
+  assert.equal(
+    gitPathMatchesAllowedPattern(
+      "apps/admin-hq-web/src/views/ContractView.vue",
+      "apps/admin-hq-web/src/**/*.vue",
+    ),
+    true,
+  );
+  assert.equal(
+    gitPathMatchesAllowedPattern(
+      "apps/admin-agent-web/src/views/ContractView.vue",
+      "apps/admin-hq-web/src/**/*.vue",
+    ),
+    false,
+  );
+});
+
+test("scoped dirty helper rejects conflicts and unmatched files", () => {
+  assert.equal(hasUnmergedGitStatus("UU src/conflict.ts"), true);
+  assert.equal(hasUnmergedGitStatus(" M src/clean.ts"), false);
+
+  const unauthorized = findUnauthorizedGitStatusEntries(
+    [
+      " M docs/ai/tasks/ADO-876.md",
+      "?? docs/ai/tasks/raw/source.json",
+      " M src/unrelated.ts",
+    ].join("\n"),
+    ["docs/ai/tasks/ADO-876.md", "docs/ai/tasks/raw/"],
+  );
+
+  assert.deepEqual(
+    unauthorized.map((entry) => entry.raw),
+    ["M src/unrelated.ts"],
+  );
+});
 
 test("default Codex login command uses the supported login subcommand", () => {
   assert.equal(DEFAULT_CODEX_LOGIN_COMMAND, "codex login");

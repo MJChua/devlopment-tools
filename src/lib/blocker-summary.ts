@@ -160,6 +160,30 @@ export function summarizeStageGateBlocker(item: string): BlockerSummary {
   }
 
   if (
+    normalized.includes("git_remote_unreachable") ||
+    normalized.includes("git fetch origin failed") ||
+    normalized.includes("git ls-remote origin") ||
+    ((normalized.includes("ssh.dev.azure.com") ||
+      normalized.includes("could not read from remote repository") ||
+      normalized.includes("could not read username") ||
+      normalized.includes("authentication failed") ||
+      normalized.includes("permission denied (publickey)") ||
+      normalized.includes("connection timed out")) &&
+      normalized.includes("origin"))
+  ) {
+    return {
+      title: "Git remote cannot be reached",
+      reason:
+        "Local Worker is connected, but the selected repository cannot read origin/develop from its Git remote.",
+      nextAction:
+        "Fix VPN/firewall/SSH key/credentials, or manually switch this repository remote to HTTPS, then rerun the same Agent.",
+      original,
+      kind: "git_remote_unreachable",
+      details: getGitRemoteBlockerDetails(original),
+    };
+  }
+
+  if (
     normalized.includes("repo_dirty_blocked") ||
     normalized.includes("uncommitted changes") ||
     normalized.includes("本機 repo 目前有未提交異動") ||
@@ -380,6 +404,23 @@ function summarizePrBranchOutdatedDiagnostic(
     details,
     warnings,
   };
+}
+
+function getGitRemoteBlockerDetails(original: string) {
+  const details: { label: string; value: string }[] = [];
+  const reason = original.match(/git_remote_unreachable:[^(]*\(([^)]+)\)/i)?.[1];
+  if (reason) {
+    details.push({ label: "Reason", value: reason });
+  }
+
+  const endpoint =
+    original.match(/\bhost\s+([a-z0-9.-]+\.[a-z0-9.-]+)\s+port\s+(\d+)\b/i) ??
+    original.match(/\b([a-z0-9.-]+\.[a-z0-9.-]+):(\d+)\b/i);
+  if (endpoint) {
+    details.push({ label: "Endpoint", value: `${endpoint[1]}:${endpoint[2]}` });
+  }
+
+  return details;
 }
 
 function parseBlockerDiagnostic(

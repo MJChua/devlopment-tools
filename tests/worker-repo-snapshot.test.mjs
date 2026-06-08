@@ -2054,6 +2054,94 @@ test("PR traceability links only verified PR-ready draft PR requests", async () 
   );
 });
 
+test("Agent2 poll payload includes Agent1 allowed file patterns", async () => {
+  const {
+    completeWorkerRun,
+    createRequest,
+    dispatchNextAgent,
+    pollWorkerRun,
+    registerWorker,
+    updateWorkerRepositoryCandidates,
+    updateWorkerSelectedRepository,
+  } = await import("../src/lib/control-plane-db.ts");
+
+  const worker = registerWorker({
+    workerId: `worker-agent2-allowed-files-${randomUUID()}`,
+    displayName: "Agent2 Allowed Files Worker",
+    commandTemplate: "echo ok",
+  });
+  const repoPath = `C:\\workspace\\repo-agent2-allowed-${randomUUID()}`;
+  updateWorkerRepositoryCandidates({
+    workerId: worker.workerId,
+    token: worker.token,
+    repositories: [{ name: "repo-agent2-allowed", path: repoPath, source: "scan" }],
+    readiness: {
+      codexReady: true,
+      codexStatus: "ready",
+      codexError: "",
+      codexDiagnosticCode: "ready",
+      codexExecutablePath: "codex",
+    },
+  });
+  updateWorkerSelectedRepository({ workerId: worker.workerId, repoPath });
+
+  const request = createRequest({
+    detail: "Write spec source snapshots.",
+    assignedWorkerId: worker.workerId,
+    repoPath,
+    deliveryMode: "draft_pr",
+    azureReferenceType: "work-item",
+    azureReferenceId: "876",
+    azureReferenceEvidence: verifiedAzureReferenceEvidence("876"),
+  });
+  const agent0 = dispatchNextAgent({ requestId: request.requestId });
+  completeWorkerRun(worker.workerId, worker.token, agent0.runId, {
+    status: "completed",
+    commandOutput: "ok",
+    diffSummary: "clean",
+    artifact: "# Agent0",
+  });
+  const agent1 = pollWorkerRun(worker.workerId, worker.token);
+  assert.equal(agent1?.agentRole, "agent1");
+  completeWorkerRun(worker.workerId, worker.token, agent1.runId, {
+    status: "completed",
+    commandOutput: "ok",
+    diffSummary: "raw source snapshots",
+    artifact: [
+      "# Source Check Report",
+      "",
+      "## Confirmed Requirements",
+      "- Normalize Work Item 876 spec evidence.",
+      "",
+      "## Confirmed Scope",
+      "- Documentation/source snapshot only.",
+      "",
+      "## Allowed Files",
+      "- `docs/ai/tasks/ADO-876.md`",
+      "- `docs/ai/tasks/raw/`",
+      "",
+      "## Non-Scope",
+      "- No implementation.",
+      "",
+      "## Do Not Touch",
+      "- apps/**",
+      "",
+      "## Can Proceed",
+      "yes",
+      "",
+      "## Task Package For Agent2",
+      "- Write the normalized task document.",
+    ].join("\n"),
+  });
+
+  const agent2 = pollWorkerRun(worker.workerId, worker.token);
+  assert.equal(agent2?.agentRole, "agent2");
+  assert.deepEqual(agent2.allowedFilePatterns, [
+    "`docs/ai/tasks/ADO-876.md`",
+    "`docs/ai/tasks/raw/`",
+  ]);
+});
+
 function completeAndAssertNext({
   completeWorkerRun,
   getRequestDetail,

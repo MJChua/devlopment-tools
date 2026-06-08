@@ -7,8 +7,11 @@ import path from "node:path";
 
 import {
   DEFAULT_CODEX_LOGIN_COMMAND,
+  classifyGitRemoteError,
   decodeCommandBuffer,
   diagnoseCodexReadiness,
+  findUnauthorizedGitStatusEntries,
+  hasUnmergedGitStatus,
   parseCommandOutputLines,
 } from "./local-worker-utils.mjs";
 
@@ -585,13 +588,24 @@ function renderCommand(template, values) {
 }
 
 async function prepareExecutionRepository(run, repoPath, progress) {
-  if (run.agentRole !== "agent2" || !isDraftPrRun(run)) {
+  if (!isDraftPrRun(run)) {
+    return { repoPath };
+  }
+
+  const trace = getRunPrDeliveryTrace(run);
+  if (!trace.sourceBranch) {
+    if (autoCommitAndPr && run.agentRole === "agent2") {
+      throw new Error(
+        "Cannot prepare the team PR branch because this draft PR request has no verified Azure Work Item. Verify an Azure Work Item so the worker can use feature/{id}, bug/{id}, or hotfix/{id}.",
+      );
+    }
+
     return { repoPath };
   }
 
   progress.setProgress(
     "Preparing local workspace",
-    "Preparing the selected repository branch before Agent2.",
+    `Preparing the selected repository branch for ${run.agentRole}.`,
   );
 
   const gitCheck = await runCommand("git rev-parse --show-toplevel", repoPath, {}, 15000);
@@ -601,38 +615,85 @@ async function prepareExecutionRepository(run, repoPath, progress) {
     );
   }
 
-  await ensureCleanGitWorktree(
-    repoPath,
-    "Cannot prepare the request branch because the selected repo has uncommitted changes. Commit, stash, or discard unrelated changes before rerunning Agent2.",
-  );
   await runGitOrThrow("git fetch origin", repoPath, 120000);
 
-  const trace = getRunPrDeliveryTrace(run);
-  const branchName =
-    trace.sourceBranch || `codex/${sanitizeBranchSegment(run.requestId)}`;
-  if (autoCommitAndPr && !trace.sourceBranch) {
-    throw new Error(
-      "Cannot prepare the team PR branch because this draft PR request has no verified Azure Work Item. Verify an Azure Work Item so the worker can use feature/{id}, bug/{id}, or hotfix/{id}.",
+  const branchName = trace.sourceBranch;
+  const currentBranch = await getCurrentBranch(repoPath);
+  const branchExists = await gitRefExists(repoPath, `refs/heads/${branchName}`);
+  const remoteBranchExists = await gitRefExists(
+    repoPath,
+    `refs/remotes/origin/${branchName}`,
+  );
+
+  if (run.agentRole === "agent0") {
+    await prepareFormalRequestBranchFromCleanWorkspace({
+      repoPath,
+      branchName,
+      currentBranch,
+      branchStartConfirmed: run.branchStartConfirmed,
+    });
+    return { repoPath };
+  }
+
+  if (currentBranch !== branchName) {
+    const usedLegacyRecovery = await tryPrepareLegacyAgent2Branch({
+      run,
+      repoPath,
+      branchName,
+      currentBranch,
+      branchExists,
+      remoteBranchExists,
+    });
+    if (!usedLegacyRecovery) {
+      throw new Error(
+        `branch_start_confirmation_required: The selected local workspace is currently on ${currentBranch || "detached HEAD"}. This request must continue on ${branchName}; switch back to ${branchName} or recover the branch before rerunning ${run.agentRole}.`,
+      );
+    }
+  }
+
+  if (trace.sourceBranch) {
+    await ensurePrBranchIncludesDevelop(repoPath, trace.sourceBranch);
+  }
+
+  if (run.agentRole === "agent2") {
+    await ensureScopedDirtyWorktree(
+      repoPath,
+      run.allowedFilePatterns || [],
+      "Cannot start Agent2 because the selected repo has uncommitted changes outside Agent1 allowed files. Commit, stash, or discard unrelated changes before rerunning Agent2.",
     );
   }
 
-  const currentBranch = await getCurrentBranch(repoPath);
+  return { repoPath };
+}
+
+async function prepareFormalRequestBranchFromCleanWorkspace({
+  repoPath,
+  branchName,
+  currentBranch,
+  branchStartConfirmed,
+}) {
+  await ensureCleanGitWorktree(
+    repoPath,
+    "Cannot prepare the request branch because the selected repo has uncommitted changes. Commit, stash, or discard unrelated changes before creating the request.",
+  );
+
   if (
     currentBranch &&
     currentBranch !== "develop" &&
     currentBranch !== branchName &&
-    !run.branchStartConfirmed
+    !branchStartConfirmed
   ) {
     throw new Error(
-      `branch_start_confirmation_required: The selected local workspace is currently on ${currentBranch}. Confirm switching back to develop and fetching the latest origin/develop before rerunning Agent2.`,
+      `branch_start_confirmation_required: The selected local workspace is currently on ${currentBranch}. Confirm switching back to develop and fetching the latest origin/develop before creating the request branch.`,
     );
   }
 
-  const baseRef = await resolveSingleWorkingTreeBaseRef(repoPath, Boolean(trace.sourceBranch));
+  const baseRef = await resolveSingleWorkingTreeBaseRef(repoPath, true);
   const branchExists = await gitRefExists(repoPath, `refs/heads/${branchName}`);
-  const remoteBranchExists = trace.sourceBranch
-    ? await gitRefExists(repoPath, `refs/remotes/origin/${branchName}`)
-    : false;
+  const remoteBranchExists = await gitRefExists(
+    repoPath,
+    `refs/remotes/origin/${branchName}`,
+  );
 
   if (currentBranch !== branchName) {
     await checkoutLatestDevelop(repoPath);
@@ -654,11 +715,69 @@ async function prepareExecutionRepository(run, repoPath, progress) {
     );
   }
 
-  if (trace.sourceBranch) {
-    await ensurePrBranchIncludesDevelop(repoPath, trace.sourceBranch);
+  await ensurePrBranchIncludesDevelop(repoPath, branchName);
+}
+
+async function tryPrepareLegacyAgent2Branch({
+  run,
+  repoPath,
+  branchName,
+  currentBranch,
+  branchExists,
+  remoteBranchExists,
+}) {
+  if (
+    run.agentRole !== "agent2" ||
+    currentBranch !== "develop" ||
+    branchExists ||
+    remoteBranchExists
+  ) {
+    return false;
   }
 
-  return { repoPath };
+  const status = await gitStatusPorcelain(repoPath);
+  if (!status.trim()) {
+    await checkoutLatestDevelop(repoPath);
+    await runGitOrThrow(`git checkout -b ${quote(branchName)} origin/develop`, repoPath, 120000);
+    return true;
+  }
+
+  ensureScopedDirtyStatus(
+    status,
+    run.allowedFilePatterns || [],
+    "Cannot prepare the request branch because the selected repo has uncommitted changes outside Agent1 allowed files. Commit, stash, or discard unrelated changes before rerunning Agent2.",
+  );
+  await ensureHeadMatchesOriginDevelop(repoPath);
+  await runGitOrThrow(`git checkout -b ${quote(branchName)}`, repoPath, 120000);
+  return true;
+}
+
+async function ensureHeadMatchesOriginDevelop(repoPath) {
+  const originDevelop = await runCommand(
+    "git rev-parse --verify origin/develop",
+    repoPath,
+    {},
+    15000,
+  );
+  if (originDevelop.exitCode !== 0) {
+    throw new Error(
+      "Cannot prepare the formal PR branch because origin/develop was not found.",
+    );
+  }
+
+  const result = await runCommand(
+    "git diff --quiet HEAD origin/develop",
+    repoPath,
+    {},
+    15000,
+  );
+  if (result.exitCode === 0) {
+    return;
+  }
+
+  throw new Error(
+    "Cannot prepare the request branch while develop has uncommitted changes or is behind origin/develop and the worktree is dirty. Update develop manually, then rerun Agent2.",
+  );
 }
 
 async function resolveSingleWorkingTreeBaseRef(repoPath, requireDevelop = false) {
@@ -845,6 +964,40 @@ async function ensureCleanGitWorktree(cwd, message) {
   }
 }
 
+async function ensureScopedDirtyWorktree(cwd, allowedFilePatterns, message) {
+  ensureScopedDirtyStatus(await gitStatusPorcelain(cwd), allowedFilePatterns, message);
+}
+
+function ensureScopedDirtyStatus(status, allowedFilePatterns, message) {
+  if (!status.trim()) {
+    return;
+  }
+
+  if (hasUnmergedGitStatus(status)) {
+    throw new Error(`${message}\n\nCurrent git status:\n${status.trim()}`);
+  }
+
+  const unauthorized = findUnauthorizedGitStatusEntries(
+    status,
+    allowedFilePatterns,
+  );
+  if (unauthorized.length === 0) {
+    return;
+  }
+
+  throw new Error(
+    [
+      message,
+      "",
+      "Unauthorized git status:",
+      unauthorized.map((entry) => entry.raw).join("\n"),
+      "",
+      "Current git status:",
+      status.trim(),
+    ].join("\n"),
+  );
+}
+
 async function gitStatusPorcelain(cwd) {
   const result = await runCommand("git status --porcelain", cwd, {}, 30000);
   if (result.exitCode !== 0) {
@@ -852,12 +1005,6 @@ async function gitStatusPorcelain(cwd) {
   }
 
   return result.output;
-}
-
-function hasUnmergedStatus(status) {
-  return parseCommandOutputLines(status).some((line) =>
-    /^(DD|AU|UD|UA|DU|AA|UU|U | U)/.test(line),
-  );
 }
 
 function getRunPrDeliveryTrace(run) {
@@ -1158,11 +1305,11 @@ async function finalizeTeamPrDelivery(run, repoPath, progress) {
   if (!status.trim()) {
     return `No local changes found to commit for ${trace.sourceBranch}.`;
   }
-  if (hasUnmergedStatus(status)) {
-    throw new Error(
-      "Cannot commit and push because the selected local workspace has unresolved merge conflicts.",
-    );
-  }
+  ensureScopedDirtyStatus(
+    status,
+    run.allowedFilePatterns || [],
+    "Cannot commit and push because the selected local workspace has uncommitted changes outside Agent1 allowed files.",
+  );
 
   await runGitOrThrow("git add -A", repoPath, 120000);
   const staged = await runCommand("git diff --cached --quiet", repoPath, {}, 120000);
@@ -1272,6 +1419,11 @@ function formatBlockedWorkerError(error) {
     return `worker_internal_error: 本機背景 Worker 內部錯誤，請更新/重啟 Worker；若仍同錯，表示 App 提供的 worker bundle 需要修復。原始錯誤：${message}`;
   }
 
+  const gitRemoteReason = getGitRemoteUnreachableReason(message);
+  if (gitRemoteReason) {
+    return `git_remote_unreachable: Git remote origin is not reachable (${gitRemoteReason}). Local Worker is connected, but the selected repo cannot fetch origin/develop. Fix VPN/firewall/SSH key/credentials, or change the repo remote manually to HTTPS before rerunning the same Agent. Original error: ${message}`;
+  }
+
   if (isPrBranchOutdatedError(message)) {
     return `pr_branch_outdated: PR 分支尚未包含最新 origin/develop。這不是本機 develop 沒有拉到最新；Worker 不會自動 merge/rebase PR 分支。Original error: ${message}`;
   }
@@ -1289,6 +1441,32 @@ function isWorkerVersionMismatchError(message) {
 
 function isWorkerInternalError(error, message) {
   return error instanceof ReferenceError || /is not defined/i.test(message);
+}
+
+function getGitRemoteUnreachableReason(message) {
+  if (!isGitRemoteCommandOrOutput(message)) {
+    return "";
+  }
+
+  const timedOut = /command timed out|timed out after|operation timed out/i.test(
+    message,
+  );
+  const reason = classifyGitRemoteError(message, { timedOut });
+  if (reason !== "unknown") {
+    return reason;
+  }
+
+  if (/could not read from remote repository|repository not found/i.test(message)) {
+    return "auth_failed";
+  }
+
+  return "unknown";
+}
+
+function isGitRemoteCommandOrOutput(message) {
+  return /git fetch origin|git ls-remote|remote origin|origin\/develop|ssh\.dev\.azure\.com|could not read from remote repository|authentication failed|permission denied \(publickey\)|could not read username/i.test(
+    message,
+  );
 }
 
 function isRepoDirtyError(message) {

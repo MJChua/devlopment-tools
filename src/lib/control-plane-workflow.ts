@@ -91,6 +91,7 @@ export type StageGateRecoveryKind =
   | "worker_internal_error"
   | "worker_version_mismatch"
   | "worker_offline"
+  | "git_remote_unreachable"
   | "repo_dirty_blocked"
   | "pr_branch_outdated"
   | "stale_run"
@@ -281,6 +282,7 @@ export type WorkerRun = {
   usedResumeSnapshot: boolean;
   isRetryContext: boolean;
   branchStartConfirmed: boolean;
+  allowedFilePatterns?: string[];
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -1969,6 +1971,24 @@ export function isRepoDirtyBlockedRun(run: Pick<WorkerRun, "error" | "artifact">
   );
 }
 
+export function isGitRemoteUnreachableRun(
+  run: Pick<WorkerRun, "error" | "artifact">,
+) {
+  const text = `${run.error}\n${run.artifact}`.toLowerCase();
+  return (
+    text.includes("git_remote_unreachable") ||
+    text.includes("git fetch origin failed:") ||
+    text.includes("git ls-remote origin") ||
+    ((text.includes("ssh.dev.azure.com") ||
+      text.includes("could not read from remote repository") ||
+      text.includes("could not read username") ||
+      text.includes("authentication failed") ||
+      text.includes("permission denied (publickey)") ||
+      text.includes("connection timed out")) &&
+      text.includes("origin"))
+  );
+}
+
 export function isPrBranchOutdatedRun(run: Pick<WorkerRun, "error" | "artifact">) {
   const text = `${run.error}\n${run.artifact}`.toLowerCase();
   return (
@@ -2040,6 +2060,10 @@ export function evaluateWorkflowStageGate(
     } else if (isWorkerVersionMismatchRun(failedRun)) {
       blockers.push(
         "worker_version_mismatch: 本機 Worker 版本不同步，請重新下載並重啟 Worker。",
+      );
+    } else if (isGitRemoteUnreachableRun(failedRun)) {
+      blockers.push(
+        `git_remote_unreachable: Local Worker is connected, but Git remote origin cannot be read. Fix VPN/firewall/SSH key/credentials, or change the repo remote manually to HTTPS, then rerun the same Agent. ${failedRun.error || ""}`,
       );
     } else if (isRepoDirtyBlockedRun(failedRun)) {
       blockers.push(
@@ -2191,6 +2215,9 @@ export function evaluateWorkflowStageGate(
     const workerVersionMismatch = failedRun
       ? isWorkerVersionMismatchRun(failedRun)
       : false;
+    const gitRemoteUnreachable = failedRun
+      ? isGitRemoteUnreachableRun(failedRun)
+      : false;
     const repoDirtyBlocked = failedRun ? isRepoDirtyBlockedRun(failedRun) : false;
     const prBranchOutdated = failedRun ? isPrBranchOutdatedRun(failedRun) : false;
     const userCancelled = failedRun?.status === "cancelled";
@@ -2216,13 +2243,15 @@ export function evaluateWorkflowStageGate(
             ? "worker_internal_error"
             : workerVersionMismatch
               ? "worker_version_mismatch"
-              : repoDirtyBlocked
-                ? "repo_dirty_blocked"
-                : prBranchOutdated
-                  ? "pr_branch_outdated"
-                  : failedRun.status === "failed"
-                    ? "agent_failed"
-                    : "agent_blocked"
+              : gitRemoteUnreachable
+                ? "git_remote_unreachable"
+                : repoDirtyBlocked
+                  ? "repo_dirty_blocked"
+                  : prBranchOutdated
+                    ? "pr_branch_outdated"
+                    : failedRun.status === "failed"
+                      ? "agent_failed"
+                      : "agent_blocked"
         : "none",
       canAutoRepair,
       canManualRetry: Boolean(failedRun),
@@ -2230,6 +2259,7 @@ export function evaluateWorkflowStageGate(
         failedRun &&
           !isHandoffSchemaRun(failedRun) &&
           !workerRuntimeError &&
+          !gitRemoteUnreachable &&
           !repoDirtyBlocked &&
           !prBranchOutdated &&
           !userCancelled,

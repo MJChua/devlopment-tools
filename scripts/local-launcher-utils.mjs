@@ -7,9 +7,11 @@ export const LOCAL_LAUNCHER_HOST = "127.0.0.1";
 export const LOCAL_LAUNCHER_PORT = Number(
   process.env.CODEX_MISSION_CONTROL_LAUNCHER_PORT || 17320,
 );
-export const LOCAL_LAUNCHER_VERSION = "0.2.1";
+export const LOCAL_LAUNCHER_VERSION = "0.2.2";
 export const LOCAL_LAUNCHER_TASK_NAME = "CodexMissionControlLocalLauncher";
 export const WORKER_MANIFEST_FILE = "worker-manifest.json";
+export const GIT_REMOTE_DEVELOP_REF = "refs/heads/develop";
+export const GIT_REMOTE_CHECK_TIMEOUT_MS = 15000;
 
 const defaultDevOrigins = ["http://localhost:3000", "http://127.0.0.1:3000"];
 
@@ -17,6 +19,160 @@ export const dpapiProfileCipher = {
   protect: protectStringWithDpapi,
   unprotect: unprotectStringWithDpapi,
 };
+
+export function parseGitRemoteUrl(value) {
+  const originUrl = String(value || "").trim();
+  const empty = {
+    originUrl,
+    protocol: "missing",
+    host: "",
+    port: null,
+    targetRef: GIT_REMOTE_DEVELOP_REF,
+  };
+  if (!originUrl) {
+    return empty;
+  }
+
+  try {
+    const url = new URL(originUrl);
+    const urlProtocol = url.protocol.replace(/:$/, "").toLowerCase();
+    const protocol =
+      urlProtocol === "ssh"
+        ? "ssh"
+        : urlProtocol === "https"
+          ? "https"
+          : "other";
+    return {
+      originUrl,
+      protocol,
+      host: url.hostname,
+      port: url.port
+        ? Number(url.port)
+        : protocol === "ssh"
+          ? 22
+          : protocol === "https"
+            ? 443
+            : null,
+      targetRef: GIT_REMOTE_DEVELOP_REF,
+    };
+  } catch {
+    // Fall through to scp-like SSH syntax, e.g. git@ssh.dev.azure.com:v3/org/project/repo.
+  }
+
+  const scpLikeMatch = /^[a-zA-Z]:[\\/]/.test(originUrl)
+    ? null
+    : originUrl.match(/^(?:[^@\s]+@)?([^:\s]+):(.+)$/);
+  if (scpLikeMatch) {
+    return {
+      originUrl,
+      protocol: "ssh",
+      host: scpLikeMatch[1],
+      port: 22,
+      targetRef: GIT_REMOTE_DEVELOP_REF,
+    };
+  }
+
+  return {
+    originUrl,
+    protocol: "other",
+    host: "",
+    port: null,
+    targetRef: GIT_REMOTE_DEVELOP_REF,
+  };
+}
+
+export function buildGitRemoteCheckEnv(originUrl) {
+  const remote = parseGitRemoteUrl(originUrl);
+  return {
+    GIT_TERMINAL_PROMPT: "0",
+    ...(remote.protocol === "ssh"
+      ? { GIT_SSH_COMMAND: "ssh -o BatchMode=yes -o ConnectTimeout=10" }
+      : {}),
+  };
+}
+
+export function buildGitRemoteDiagnostic({
+  originUrl = "",
+  output = "",
+  exitCode = 1,
+  timedOut = false,
+  skipped = false,
+} = {}) {
+  const remote = parseGitRemoteUrl(originUrl);
+  if (skipped) {
+    return {
+      ...remote,
+      status: "skipped",
+      reason: "",
+      error: "",
+    };
+  }
+
+  if (!remote.originUrl) {
+    return {
+      ...remote,
+      status: "blocked",
+      reason: "missing_origin",
+      error: normalizeWhitespace(output) || "origin remote is not configured.",
+    };
+  }
+
+  if (!timedOut && Number(exitCode) === 0) {
+    return {
+      ...remote,
+      status: "ok",
+      reason: "",
+      error: "",
+    };
+  }
+
+  return {
+    ...remote,
+    status: "blocked",
+    reason: classifyGitRemoteError(output, { timedOut }),
+    error:
+      normalizeWhitespace(output) ||
+      (timedOut
+        ? "git ls-remote origin refs/heads/develop timed out."
+        : `git ls-remote origin refs/heads/develop exited ${exitCode}.`),
+  };
+}
+
+export function classifyGitRemoteError(output, { timedOut = false } = {}) {
+  const normalized = normalizeWhitespace(output).toLowerCase();
+  if (
+    timedOut ||
+    /\b(etimedout|timed out|timeout|operation timed out)\b/i.test(normalized)
+  ) {
+    return "network_timeout";
+  }
+
+  if (
+    /could not resolve hostname|name or service not known|getaddrinfo|enotfound|eai_again|no such host/i.test(
+      normalized,
+    )
+  ) {
+    return "dns_failed";
+  }
+
+  if (/connection refused|econnrefused/i.test(normalized)) {
+    return "connection_refused";
+  }
+
+  if (
+    /permission denied|publickey|authentication failed|could not read username|terminal prompts disabled|access denied|repository not found|tf401019|fatal: repository/i.test(
+      normalized,
+    )
+  ) {
+    return "auth_failed";
+  }
+
+  return "unknown";
+}
+
+function normalizeWhitespace(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
 
 export function getLauncherPaths(baseDir = getLocalAppData()) {
   const root = path.join(baseDir, "CodexMissionControl");

@@ -547,6 +547,22 @@ test("blocker summaries explain worker runtime and dirty repo blockers", () => {
   assert.match(summaries[2].nextAction, /commit、stash/);
 });
 
+test("blocker summaries explain git remote unreachable blockers", () => {
+  const summaries = summarizeStageGateBlockers([
+    "git_remote_unreachable: Git remote origin is not reachable (network_timeout). Local Worker is connected, but the selected repo cannot fetch origin/develop. Original error: git fetch origin failed: ssh: connect to host ssh.dev.azure.com port 22: Connection timed out",
+  ]);
+
+  assert.equal(summaries.length, 1);
+  assert.equal(summaries[0].kind, "git_remote_unreachable");
+  assert.equal(summaries[0].title, "Git remote cannot be reached");
+  assert.match(summaries[0].reason, /Local Worker is connected/);
+  assert.match(summaries[0].nextAction, /VPN\/firewall\/SSH key/);
+  assert.deepEqual(summaries[0].details, [
+    { label: "Reason", value: "network_timeout" },
+    { label: "Endpoint", value: "ssh.dev.azure.com:22" },
+  ]);
+});
+
 test("blocker summaries explain verified Work Item branch requirements", () => {
   const summaries = summarizeStageGateBlockers([
     "Draft PR branch preparation requires a verified Azure Work Item.",
@@ -889,6 +905,45 @@ test("workflow stage gate separates dirty repo blockers", () => {
   assert.equal(stageGate.recoveryKind, "repo_dirty_blocked");
   assert.equal(stageGate.needsClarification, false);
   assert.match(stageGate.blockers[0], /未提交異動/);
+});
+
+test("workflow stage gate separates git remote unreachable blockers", () => {
+  const blockedRun = sampleRun({
+    runId: "agent0-git-remote",
+    agentRole: "agent0",
+    status: "blocked",
+    error:
+      "git_remote_unreachable: Git remote origin is not reachable (network_timeout). Local Worker is connected, but the selected repo cannot fetch origin/develop. Original error: git fetch origin failed: ssh: connect to host ssh.dev.azure.com port 22: Connection timed out",
+  });
+  const stageGate = evaluateWorkflowStageGate({
+    request: sampleRequest({ status: "blocked" }),
+    runs: [blockedRun],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(stageGate.status, "blocked");
+  assert.equal(stageGate.recoveryKind, "git_remote_unreachable");
+  assert.equal(stageGate.needsClarification, false);
+  assert.match(stageGate.blockers[0], /git_remote_unreachable/);
+});
+
+test("workflow stage gate classifies fetch timeout as git remote blocker", () => {
+  const blockedRun = sampleRun({
+    runId: "agent0-git-fetch-timeout",
+    agentRole: "agent0",
+    status: "blocked",
+    error:
+      "git fetch origin failed: ssh: connect to host ssh.dev.azure.com port 22: Connection timed out",
+  });
+  const stageGate = evaluateWorkflowStageGate({
+    request: sampleRequest({ status: "blocked" }),
+    runs: [blockedRun],
+    prLinks: [],
+    auditEvents: [],
+  });
+
+  assert.equal(stageGate.recoveryKind, "git_remote_unreachable");
 });
 
 test("workflow stage gate separates outdated PR branch blockers", () => {

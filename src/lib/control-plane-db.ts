@@ -1437,6 +1437,18 @@ export function pollWorkerRun(workerId: string, token: string) {
   return pollWorker(workerId, token).run;
 }
 
+function buildWorkerRunPayload(run: WorkerRun): WorkerRun {
+  if (run.agentRole !== "agent2") {
+    return run;
+  }
+
+  const request = getRequest(run.requestId);
+  return {
+    ...run,
+    allowedFilePatterns: request?.resumeSnapshot?.allowedFiles ?? [],
+  };
+}
+
 function assertNoActiveRequestForRepo(input: {
   requestId: string;
   workerId: string;
@@ -1568,7 +1580,7 @@ export function pollWorker(workerId: string, token: string) {
   );
 
   return {
-    run: requireRun(String(row.run_id)),
+    run: buildWorkerRunPayload(requireRun(String(row.run_id))),
     recheckReadiness: false,
     setupCodex: false,
   };
