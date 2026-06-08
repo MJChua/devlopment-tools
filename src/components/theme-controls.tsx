@@ -1,7 +1,7 @@
 "use client";
 
 import { Check, Monitor, Moon, Palette, Sun } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useTheme } from "@/components/theme-provider";
 import { Button } from "@/components/ui/button";
@@ -61,6 +61,7 @@ export function ThemeControls() {
   const { mounted, resolvedTheme, setTheme, theme } = useTheme();
   const [accent, setAccent] = useState<Accent>("blue");
   const [accentStorageReady, setAccentStorageReady] = useState(false);
+  const transitionTimerRef = useRef(0);
 
   useEffect(() => {
     const restoreAccent = window.setTimeout(() => {
@@ -79,6 +80,30 @@ export function ThemeControls() {
     document.documentElement.dataset.accent = accent;
     writeStoredAccent(accent);
   }, [accent, accentStorageReady, mounted]);
+
+  useEffect(
+    () => () => window.clearTimeout(transitionTimerRef.current),
+    [],
+  );
+
+  function runThemeTransition() {
+    const root = document.documentElement;
+    root.classList.add("theme-transitioning");
+    window.clearTimeout(transitionTimerRef.current);
+    transitionTimerRef.current = window.setTimeout(() => {
+      root.classList.remove("theme-transitioning");
+    }, 260);
+  }
+
+  function selectTheme(nextTheme: (typeof MODES)[number]["value"]) {
+    runThemeTransition();
+    setTheme(nextTheme);
+  }
+
+  function selectAccent(nextAccent: Accent) {
+    runThemeTransition();
+    setAccent(nextAccent);
+  }
 
   const currentTheme = mounted ? theme : "system";
   const isDark = mounted && resolvedTheme === "dark";
@@ -107,7 +132,7 @@ export function ThemeControls() {
             <DropdownMenuItem
               className="cursor-pointer justify-between"
               key={mode.value}
-              onSelect={() => setTheme(mode.value)}
+              onSelect={() => selectTheme(mode.value)}
             >
               <span className="inline-flex items-center gap-2">
                 <Icon className="h-4 w-4" />
@@ -126,7 +151,7 @@ export function ThemeControls() {
             <DropdownMenuItem
               className="cursor-pointer justify-between"
               key={item.value}
-              onSelect={() => setAccent(item.value)}
+              onSelect={() => selectAccent(item.value)}
             >
               <span className="inline-flex items-center gap-2">
                 <span

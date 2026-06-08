@@ -117,6 +117,9 @@ body {
     var(--background);
   color: var(--foreground);
   font-family: var(--font-geist-sans);
+  transition:
+    background-color 220ms ease,
+    color 220ms ease;
 }
 
 button,
@@ -162,6 +165,134 @@ code {
   animation: toast-fade 3.2s ease forwards;
 }
 
+@keyframes setup-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes setup-backdrop-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes setup-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes setup-panel-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.985);
+  }
+}
+
+.setup-dialog-backdrop-in {
+  animation: setup-backdrop-in 180ms ease-out both;
+}
+
+.setup-dialog-backdrop-out {
+  animation: setup-backdrop-out 520ms ease both;
+}
+
+.setup-dialog-panel {
+  position: relative;
+  z-index: 1;
+}
+
+.setup-dialog-panel-in {
+  animation: setup-panel-in 220ms ease-out both;
+}
+
+.setup-dialog-panel-out {
+  animation: setup-panel-out 320ms ease both;
+}
+
+.setup-welcome-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  text-align: center;
+}
+
+.setup-welcome-overlay::before {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in oklch, var(--primary) 34%, transparent),
+      color-mix(in oklch, var(--background) 88%, transparent)
+    ),
+    color-mix(in oklch, var(--background) 72%, transparent);
+  content: "";
+}
+
+.setup-welcome-overlay > * {
+  position: relative;
+  z-index: 1;
+}
+
+.setup-welcome-content {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.setup-welcome-mark {
+  position: relative;
+  display: inline-flex;
+  height: 4.75rem;
+  width: 4.75rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in oklch, white 38%, transparent);
+  border-radius: 9999px;
+  background: color-mix(in oklch, var(--primary) 62%, white 16%);
+  box-shadow: 0 20px 48px color-mix(in oklch, black 28%, transparent);
+}
+
+.setup-welcome-overlay-out {
+  animation: setup-backdrop-out 520ms ease both;
+}
+
+html.theme-transitioning body,
+html.theme-transitioning button,
+html.theme-transitioning input,
+html.theme-transitioning textarea,
+html.theme-transitioning select,
+html.theme-transitioning [class*="bg-"],
+html.theme-transitioning [class*="text-"],
+html.theme-transitioning [class*="border-"] {
+  transition:
+    background-color 220ms ease,
+    border-color 220ms ease,
+    color 220ms ease,
+    box-shadow 220ms ease;
+}
+
 @keyframes connection-breathe {
   0% {
     opacity: 0.5;
@@ -196,6 +327,26 @@ code {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  body,
+  html.theme-transitioning body,
+  html.theme-transitioning button,
+  html.theme-transitioning input,
+  html.theme-transitioning textarea,
+  html.theme-transitioning select,
+  html.theme-transitioning [class*="bg-"],
+  html.theme-transitioning [class*="text-"],
+  html.theme-transitioning [class*="border-"] {
+    transition: none;
+  }
+
+  .setup-dialog-backdrop-in,
+  .setup-dialog-backdrop-out,
+  .setup-dialog-panel-in,
+  .setup-dialog-panel-out,
+  .setup-welcome-overlay-out {
+    animation-duration: 1ms;
+  }
+
   .connection-pulse::after {
     animation: none;
     display: none;

@@ -17,6 +17,7 @@ import {
   RefreshCw,
   ServerCog,
   ShieldCheck,
+  Sparkles,
   Terminal,
   Upload,
   Users,
@@ -436,6 +437,7 @@ export function WorkflowControlPlane() {
   const repoRefreshInFlightRef = useRef(false);
   const workflowRefreshInFlightRef = useRef(false);
   const [setupDialogRequested, setSetupDialogRequested] = useState(false);
+  const [setupDialogWelcome, setSetupDialogWelcome] = useState(false);
   const [
     dismissedClarificationDialogKey,
     setDismissedClarificationDialogKey,
@@ -497,6 +499,7 @@ export function WorkflowControlPlane() {
   );
   const canUseWorkflow = connectionInfo.ready && Boolean(selectedRepoPath);
   const setupDialogOpen = !canUseWorkflow || setupDialogRequested;
+  const previousSetupDialogOpenRef = useRef(setupDialogOpen);
   const launcherStatusText = formatLauncherStatus(launcherState);
   const launcherVersionMismatch =
     launcherState.launcherVersionStatus === "mismatch";
@@ -720,11 +723,14 @@ export function WorkflowControlPlane() {
   }, [recentlySubmittedRequestId]);
 
   useEffect(() => {
-    if (!previousCanUseWorkflowRef.current && canUseWorkflow) {
+    const dialogWasOpen = previousSetupDialogOpenRef.current;
+    if (!previousCanUseWorkflowRef.current && canUseWorkflow && dialogWasOpen) {
+      setSetupDialogWelcome(true);
       setSetupDialogRequested(false);
     }
     previousCanUseWorkflowRef.current = canUseWorkflow;
-  }, [canUseWorkflow]);
+    previousSetupDialogOpenRef.current = setupDialogOpen;
+  }, [canUseWorkflow, setupDialogOpen]);
 
   useEffect(() => {
     const canLoadWorkItems =
@@ -1591,7 +1597,7 @@ export function WorkflowControlPlane() {
       }));
     }
     setState("success");
-    setMessage("已另開調整需求；同一 Azure Work Item 會更新同一個 PR 分支。");
+    setMessage("已建立補充調整；同一 Azure Work Item 會更新同一個 PR 分支。");
     window.setTimeout(() => requestDetailRef.current?.focus(), 0);
   }
 
@@ -2565,6 +2571,8 @@ export function WorkflowControlPlane() {
           canClose={canUseWorkflow}
           open={setupDialogOpen}
           onClose={() => setSetupDialogRequested(false)}
+          onExited={() => setSetupDialogWelcome(false)}
+          showWelcome={setupDialogWelcome}
         >
             <div className="flex flex-col gap-3">
               <SetupStep
@@ -2603,12 +2611,13 @@ export function WorkflowControlPlane() {
                 {workerForm.autoCommitAndPr ? (
                   <>
                     <TextField
-                      label="我的 Azure PAT"
+                      hideLabel
+                      label="Azure access token"
                       value={workerForm.azurePat}
                       onChange={(azurePat) =>
                         setWorkerForm((current) => ({ ...current, azurePat }))
                       }
-                      placeholder="只送到本機 Launcher，不會送到 /api/workers"
+                      placeholder="請輸入您的 Azure access token"
                       type="password"
                     />
                     <PatPersistenceStatus
@@ -2721,10 +2730,8 @@ export function WorkflowControlPlane() {
                   <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
                     <div className="font-semibold">Launcher 暫時模式</div>
                     <ul className="mt-2 list-disc space-y-1 pl-5">
-                      <li>Launcher 已是目前版本，但正式常駐安裝尚未完成。</li>
-                      <li>目前透過 Startup folder 暫時啟動，可繼續使用。</li>
-                      <li>重開機後可能不會自動啟動。</li>
-                      <li>請貼到以系統管理員身分開啟的 PowerShell，建立 Windows Scheduled Task。</li>
+                      <li>目前可以繼續使用暫時連線。</li>
+                      <li>請用系統管理員 PowerShell 執行安裝指令，完成 Windows Scheduled Task 常駐安裝。</li>
                     </ul>
                     <button
                       className="mt-3 inline-flex items-center justify-center gap-2 rounded-md border border-amber-300 bg-white px-3 py-2 text-sm font-semibold text-amber-900 disabled:cursor-not-allowed disabled:bg-amber-100 disabled:text-amber-500"
@@ -2735,12 +2742,9 @@ export function WorkflowControlPlane() {
                       <Clipboard className="h-4 w-4" />
                       複製管理員安裝指令
                     </button>
-                    <p className="mt-2 text-xs font-medium text-amber-800">
-                      完成後重新檢查，/health 應回報 installMode=scheduled-task、requiresAdminInstall=false、scheduledTaskStatus=installed。
-                    </p>
                     <details className="mt-2 text-xs text-amber-800">
                       <summary className="cursor-pointer font-semibold">
-                        查看詳情
+                        查看診斷
                       </summary>
                       <div className="mt-1 space-y-1 break-all">
                         <div>目前版本：{launcherState.version || "未知"}</div>
@@ -2852,7 +2856,7 @@ export function WorkflowControlPlane() {
                 step="4"
                 title="等待回報並選擇本機專案"
               >
-                <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,240px)_minmax(0,1fr)]">
+                <div className="grid min-w-0 gap-2 lg:grid-cols-[minmax(0,240px)_minmax(0,1fr)]">
                   <WorkerConnectionStatus
                     connectionInfo={connectionInfo}
                     onSetup={requestCodexSetup}
@@ -3884,27 +3888,121 @@ function formatRealtimeStatus(status: RealtimeConnectionStatus) {
   return labels[status];
 }
 
+const SETUP_DIALOG_EXIT_MS = 520;
+const SETUP_WELCOME_HOLD_MS = 1800;
+const SETUP_WELCOME_FADE_MS = 520;
+const SETUP_REDUCED_MOTION_EXIT_MS = 40;
+
 function SetupDialog({
   canClose,
   children,
   open,
   onClose,
+  onExited,
+  showWelcome = false,
 }: {
   canClose: boolean;
   children: ReactNode;
   open: boolean;
   onClose: () => void;
+  onExited?: () => void;
+  showWelcome?: boolean;
 }) {
-  if (!open) {
+  const [mounted, setMounted] = useState(open);
+  const [closing, setClosing] = useState(false);
+  const [welcomeClosing, setWelcomeClosing] = useState(false);
+  const onExitedRef = useRef(onExited);
+
+  useEffect(() => {
+    onExitedRef.current = onExited;
+  }, [onExited]);
+
+  useEffect(() => {
+    if (open) {
+      const openTimerId = window.setTimeout(() => {
+        setMounted(true);
+        setClosing(false);
+        setWelcomeClosing(false);
+      }, 0);
+      return () => window.clearTimeout(openTimerId);
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    const reduceMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    const closingTimerId = window.setTimeout(() => setClosing(true), 0);
+    const welcomeFadeTimerId = showWelcome
+      ? window.setTimeout(
+          () => setWelcomeClosing(true),
+          SETUP_WELCOME_HOLD_MS,
+        )
+      : 0;
+    const exitDelay = showWelcome
+      ? SETUP_WELCOME_HOLD_MS +
+        (reduceMotion ? SETUP_REDUCED_MOTION_EXIT_MS : SETUP_WELCOME_FADE_MS)
+      : reduceMotion
+        ? SETUP_REDUCED_MOTION_EXIT_MS
+        : SETUP_DIALOG_EXIT_MS;
+    const exitTimerId = window.setTimeout(
+      () => {
+        setMounted(false);
+        setClosing(false);
+        setWelcomeClosing(false);
+        onExitedRef.current?.();
+      },
+      exitDelay,
+    );
+
+    return () => {
+      window.clearTimeout(closingTimerId);
+      window.clearTimeout(welcomeFadeTimerId);
+      window.clearTimeout(exitTimerId);
+    };
+  }, [mounted, open, showWelcome]);
+
+  if (!mounted) {
     return null;
   }
 
   return (
-    <div className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-6">
+    <div
+      className={`setup-dialog-backdrop fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-slate-950/45 px-4 py-6 ${
+        closing && (!showWelcome || welcomeClosing)
+          ? "setup-dialog-backdrop-out"
+          : "setup-dialog-backdrop-in"
+      }`}
+    >
+      {showWelcome ? (
+        <div
+          aria-live="polite"
+          className={`setup-welcome-overlay ${
+            welcomeClosing ? "setup-welcome-overlay-out" : ""
+          }`}
+        >
+          <div
+            aria-label="連線完成，歡迎"
+            className="setup-welcome-content"
+          >
+            <div aria-hidden="true" className="setup-welcome-mark">
+              <CheckCircle2 className="h-10 w-10 text-white" />
+              <Sparkles className="absolute -right-1 -top-1 h-5 w-5 text-white" />
+            </div>
+            <div className="text-3xl font-semibold tracking-normal text-white">
+              歡迎
+            </div>
+          </div>
+        </div>
+      ) : null}
       <section
         aria-labelledby="setup-dialog-title"
         aria-modal="true"
-        className="w-full max-w-4xl rounded-md border border-slate-200 bg-white p-4 shadow-2xl"
+        className={`setup-dialog-panel w-full max-w-4xl rounded-md border border-slate-200 bg-white p-4 shadow-2xl ${
+          closing ? "setup-dialog-panel-out" : "setup-dialog-panel-in"
+        }`}
         role="dialog"
       >
         <div className="mb-4 flex items-start justify-between gap-3 border-b border-slate-200 pb-3">
@@ -3919,9 +4017,6 @@ function SetupDialog({
             >
               連線設定
             </h2>
-            <p className="mt-1 text-sm leading-6 text-slate-600">
-              完成本機 worker 連線、Codex 檢查與專案選擇後，此視窗會自動關閉。
-            </p>
           </div>
           {canClose ? (
             <button
@@ -4530,6 +4625,7 @@ function Panel({
 }
 
 function TextField({
+  hideLabel = false,
   label,
   value,
   onChange,
@@ -4538,6 +4634,7 @@ function TextField({
   className = "",
   type = "text",
 }: {
+  hideLabel?: boolean;
   label: string;
   value: string;
   onChange: (value: string) => void;
@@ -4548,7 +4645,13 @@ function TextField({
 }) {
   return (
     <label className={`flex flex-col gap-1 ${className}`}>
-      <span className="text-xs font-semibold text-slate-600">{label}</span>
+      <span
+        className={
+          hideLabel ? "sr-only" : "text-xs font-semibold text-slate-600"
+        }
+      >
+        {label}
+      </span>
       <input
         className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 disabled:bg-slate-100"
         disabled={disabled}
@@ -4604,6 +4707,7 @@ function PatPersistenceStatus({
 
 function SelectField({
   disabled,
+  hideLabel = false,
   label,
   value,
   onChange,
@@ -4612,6 +4716,7 @@ function SelectField({
   placeholder,
 }: {
   disabled?: boolean;
+  hideLabel?: boolean;
   label: string;
   value: string;
   onChange: (value: string) => void;
@@ -4621,7 +4726,13 @@ function SelectField({
 }) {
   return (
     <div className="flex min-w-0 flex-col gap-1">
-      <span className="text-xs font-semibold text-slate-600">{label}</span>
+      <span
+        className={
+          hideLabel ? "sr-only" : "text-xs font-semibold text-slate-600"
+        }
+      >
+        {label}
+      </span>
       <Select
         disabled={disabled}
         value={value}
@@ -4702,31 +4813,71 @@ function WorkerConnectionStatus({
       connectionInfo.diagnosticCode === "desktop-internal-not-cli" ||
       connectionInfo.diagnosticCode === "cli-command-failed" ||
       connectionInfo.diagnosticCode === "missing-command");
+  const compactStatus = getCompactWorkerConnectionStatus(connectionInfo);
 
   return (
     <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-      <div className="text-xs font-semibold text-slate-600">本機 Codex</div>
+      <div className="text-xs font-semibold text-slate-600">連線狀態</div>
       <div className="mt-1 text-sm font-semibold text-slate-950">
-        {connectionInfo.label}
+        {compactStatus.label}
       </div>
-      <p className="mt-1 text-xs leading-5 text-slate-600">
-        {connectionInfo.detail}
-      </p>
+      {compactStatus.detail ? (
+        <p className="mt-1 text-xs leading-5 text-slate-600">
+          {compactStatus.detail}
+        </p>
+      ) : null}
       {showCodexHelp ? (
-        <div className="mt-3 rounded-md border border-orange-200 bg-orange-50 p-3 text-xs leading-5 text-orange-900">
+        <div className="mt-2 flex flex-col gap-2">
           <button
-            className="inline-flex items-center justify-center gap-2 rounded-md bg-orange-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60"
+            className="inline-flex w-fit items-center justify-center gap-2 rounded-md bg-orange-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60"
             disabled={settingUp}
             onClick={onSetup}
             type="button"
           >
             {settingUp ? <Spinner className="h-3.5 w-3.5" /> : null}
-            安裝
+            設定 Codex
           </button>
+          <details className="text-xs leading-5 text-slate-500">
+            <summary className="cursor-pointer font-semibold text-slate-600">
+              查看原因
+            </summary>
+            <p className="mt-1">{connectionInfo.detail}</p>
+          </details>
         </div>
       ) : null}
     </div>
   );
+}
+
+function getCompactWorkerConnectionStatus(connectionInfo: WorkerConnectionInfo) {
+  if (connectionInfo.ready) {
+    return {
+      label: "已就緒",
+      detail: "",
+    };
+  }
+
+  if (connectionInfo.label.includes("Codex")) {
+    return {
+      label: "Codex 需要設定",
+      detail: "請完成 Codex CLI 安裝或登入後再繼續。",
+    };
+  }
+
+  if (
+    connectionInfo.label.includes("等待") ||
+    connectionInfo.label.includes("逾時")
+  ) {
+    return {
+      label: "等待回報",
+      detail: "等待本機 worker 回報連線與專案清單。",
+    };
+  }
+
+  return {
+    label: "尚未啟動",
+    detail: "請先啟動本機連線。",
+  };
 }
 
 function RepositoryPicker({
@@ -4760,6 +4911,7 @@ function RepositoryPicker({
   return (
     <div className={`flex min-w-0 flex-col gap-2 ${className}`}>
       <SelectField
+        hideLabel
         label="選擇本機專案"
         value={value}
         onChange={onChange}
@@ -4774,14 +4926,14 @@ function RepositoryPicker({
         }))}
         placeholder={placeholder}
       />
-      <div className="min-h-5 text-xs leading-5 text-slate-500">
-        {loading ? (
+      {loading ? (
+        <div className="text-xs leading-5 text-slate-500">
           <span className="inline-flex items-center gap-1.5 text-blue-700">
             <Spinner className="h-3.5 w-3.5" />
             更新中
           </span>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -5814,6 +5966,14 @@ function PullRequestTraceabilityPanel({
   const traceLabel = trace.sourceBranch
     ? `${trace.sourceBranch} -> ${trace.baseBranch}`
     : `等待 Azure Work Item -> ${trace.baseBranch}`;
+  const hasFormalPrTrace = Boolean(trace.sourceBranch && trace.workItemId);
+  const canCreateOrRefreshPr =
+    hasAzurePat && discoveryState !== "loading" && hasFormalPrTrace;
+  const canDiscoverPr =
+    hasAzurePat &&
+    discoveryState !== "loading" &&
+    Boolean(trace.sourceBranch) &&
+    !hasTrackedPr;
 
   return (
     <div className="rounded-md border border-slate-200 bg-white p-4">
@@ -5847,6 +6007,11 @@ function PullRequestTraceabilityPanel({
           需要 Azure PAT，App 才能讀取 Azure Repos 並自動追蹤 PR。
         </div>
       ) : null}
+      {hasAzurePat && !hasFormalPrTrace ? (
+        <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          需先補 Azure 單號，才能建立或追蹤 Azure PR。
+        </div>
+      ) : null}
       {discoveryMessage ? (
         <div
           className={`mt-3 rounded-md border p-3 text-sm ${
@@ -5869,7 +6034,7 @@ function PullRequestTraceabilityPanel({
       <div className="mt-3 flex flex-wrap gap-2">
         <button
           className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-900 bg-slate-900 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300"
-          disabled={!hasAzurePat || discoveryState === "loading"}
+          disabled={!canCreateOrRefreshPr}
           onClick={onCreateOrRefresh}
           type="button"
         >
@@ -5882,7 +6047,7 @@ function PullRequestTraceabilityPanel({
         </button>
         <button
           className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
-          disabled={!hasAzurePat || discoveryState === "loading" || hasTrackedPr}
+          disabled={!canDiscoverPr}
           onClick={onDiscover}
           type="button"
         >
@@ -5899,7 +6064,7 @@ function PullRequestTraceabilityPanel({
           type="button"
         >
           <Plus className="h-4 w-4" />
-          另開調整需求
+          補充調整
         </button>
       </div>
       <details className="mt-3 rounded-md border border-slate-200 bg-white">

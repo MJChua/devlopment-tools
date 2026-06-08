@@ -256,11 +256,10 @@ test("workflow UI keeps launcher recovery guidance concise", () => {
   assert.match(source, /Launcher 暫時模式/);
   assert.match(source, /複製管理員安裝指令/);
   assert.match(source, /launcherState\.requiresAdminInstall\s*&&\s*!launcherVersionMismatch/);
-  assert.match(source, /Launcher 已是目前版本，但正式常駐安裝尚未完成/);
-  assert.match(source, /以系統管理員身分開啟的 PowerShell/);
-  assert.match(source, /installMode=scheduled-task/);
-  assert.match(source, /requiresAdminInstall=false/);
-  assert.match(source, /scheduledTaskStatus=installed/);
+  assert.match(source, /目前可以繼續使用暫時連線/);
+  assert.match(source, /系統管理員 PowerShell/);
+  assert.match(source, /Windows Scheduled Task 常駐安裝/);
+  assert.match(source, /查看診斷/);
   assert.match(source, /Startup folder fallback/);
   assert.match(source, /launcherState\.installMode === "temporary-startup-folder"/);
   assert.match(source, /Scheduled Task 狀態/);
@@ -284,6 +283,112 @@ test("workflow UI keeps launcher recovery guidance concise", () => {
   assert.doesNotMatch(source, /Launcher 目前是暫時啟動模式/);
   assert.doesNotMatch(source, /目前 worker 可以使用，但 Scheduled Task 尚未正式安裝/);
   assert.doesNotMatch(source, /重開機或重新登入後穩定性取決於 Startup/);
+});
+
+test("connection setup keeps project selection while reducing setup copy", () => {
+  const source = readFileSync(
+    new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /hideLabel\s+label="Azure access token"/);
+  assert.match(source, /placeholder="請輸入您的 Azure access token"/);
+  assert.doesNotMatch(source, /label="我的 Azure PAT"/);
+  assert.doesNotMatch(source, /只送到本機 Launcher，不會送到 \/api\/workers/);
+  assert.doesNotMatch(
+    source,
+    /完成本機 worker 連線、Codex 檢查與專案選擇後，此視窗會自動關閉/,
+  );
+  assert.match(source, /title="等待回報並選擇本機專案"/);
+  assert.match(
+    source,
+    /grid min-w-0 gap-2 lg:grid-cols-\[minmax\(0,240px\)_minmax\(0,1fr\)\]/,
+  );
+  assert.match(source, /<RepositoryPicker/);
+  assert.match(source, /hideLabel\s+label="選擇本機專案"/);
+  assert.doesNotMatch(
+    source,
+    /detail: "請選擇要交給 Codex 處理的本機專案。"/,
+  );
+  assert.doesNotMatch(source, /min-h-5 text-xs leading-5 text-slate-500/);
+  assert.match(source, /function WorkerConnectionStatus/);
+  assert.match(source, /設定 Codex/);
+  assert.match(source, /getCompactWorkerConnectionStatus/);
+});
+
+test("connection setup and theme changes use transition hooks", () => {
+  const workflowSource = readFileSync(
+    new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),
+    "utf8",
+  );
+  const themeSource = readFileSync(
+    new URL("../src/components/theme-controls.tsx", import.meta.url),
+    "utf8",
+  );
+  const cssSource = readFileSync(
+    new URL("../src/app/globals.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(workflowSource, /setupDialogWelcome/);
+  assert.match(workflowSource, /showWelcome/);
+  assert.match(workflowSource, /const SETUP_WELCOME_HOLD_MS = 1800/);
+  assert.match(workflowSource, /const SETUP_WELCOME_FADE_MS = 520/);
+  assert.match(workflowSource, /const \[welcomeClosing, setWelcomeClosing\]/);
+  assert.match(
+    workflowSource,
+    /setWelcomeClosing\(true\)[\s\S]*SETUP_WELCOME_HOLD_MS/,
+  );
+  assert.match(
+    workflowSource,
+    /SETUP_WELCOME_HOLD_MS \+[\s\S]*SETUP_WELCOME_FADE_MS/,
+  );
+  assert.match(workflowSource, /setup-dialog-backdrop-out/);
+  assert.match(workflowSource, /setup-welcome-overlay/);
+  assert.match(workflowSource, /welcomeClosing \? "setup-welcome-overlay-out"/);
+  assert.match(workflowSource, /aria-label="連線完成，歡迎"/);
+  assert.match(workflowSource, /setup-welcome-mark/);
+  assert.match(workflowSource, /<Sparkles/);
+  assert.doesNotMatch(workflowSource, />連線完成<\/div>/);
+  assert.match(themeSource, /theme-transitioning/);
+  assert.match(themeSource, /runThemeTransition/);
+  assert.match(cssSource, /\.setup-dialog-panel-out/);
+  assert.match(cssSource, /\.setup-welcome-overlay/);
+  assert.match(cssSource, /\.setup-welcome-content/);
+  assert.match(cssSource, /\.setup-welcome-mark/);
+  assert.match(cssSource, /prefers-reduced-motion: reduce/);
+  assert.match(cssSource, /html\.theme-transitioning body/);
+});
+
+test("PR traceability actions require a formal trace before Azure PR writes", () => {
+  const source = readFileSync(
+    new URL("../src/components/WorkflowControlPlane.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /const canCreateOrRefreshPr =/);
+  assert.match(
+    source,
+    /canCreateOrRefreshPr =[\s\S]*hasAzurePat[\s\S]*discoveryState !== "loading"[\s\S]*hasFormalPrTrace/,
+  );
+  assert.match(source, /const canDiscoverPr =/);
+  assert.match(
+    source,
+    /canDiscoverPr =[\s\S]*hasAzurePat[\s\S]*discoveryState !== "loading"[\s\S]*Boolean\(trace\.sourceBranch\)[\s\S]*!hasTrackedPr/,
+  );
+  assert.match(source, /disabled=\{!canCreateOrRefreshPr\}/);
+  assert.match(source, /disabled=\{!canDiscoverPr\}/);
+  assert.match(
+    source,
+    /需先補 Azure 單號，才能建立或追蹤 Azure PR。/,
+  );
+  assert.match(source, /補充調整/);
+  assert.match(
+    source,
+    /已建立補充調整；同一 Azure Work Item 會更新同一個 PR 分支。/,
+  );
+  assert.doesNotMatch(source, /另開調整需求/);
+  assert.doesNotMatch(source, /已另開調整需求/);
 });
 
 test("workflow request records are scoped to the selected repository", () => {
